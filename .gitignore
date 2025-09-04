@@ -17,3 +17,10 @@ script/Bilan_hydrique/gv.grow.R
 script/Bilan_hydrique/gv.rad.int.dev.R
 script/Bilan_hydrique/gv.grow.R
 script/Bilan_hydrique/wb.vine.1.4.R
+
+script/Analyses/6_reduction_dimension_cache
+script/Analyses/6_reduction_dimension_files
+script/Analyses/12_b_xgb_parcelles_cache
+script/Analyses/12_b_xgb_parcelles_files
+script/Analyses/xgb_select_cache
+script/Analyses/xgb_select_files

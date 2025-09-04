@@ -1,0 +1,279 @@
+---
+title: "xgb_select"
+author: "Gabriel Macé"
+date: "2025-05-22"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+```{r}
+library(xgboost)
+library(caret) # cross validation
+library(dplyr)
+library(ggplot2)
+library(Metrics)
+library(openxlsx)
+source("../../R_functions/shap.R")
+
+load("../../data/modelisation/observations.RData")
+```
+
+```{r}
+var_an_pheno <- colnames(observations)[12:47] # ne pas garder la longueur de la période = 365 ou 366
+var_an <- colnames(observations)[49:84] # ne pas garder la longueur de la période
+var_dormance <- colnames(observations)[85:121]
+var_deb_to_flo <- setdiff(colnames(observations)[122:158] , c("sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes <- setdiff(colnames(observations)[159:195], "sum.frost.days.0.symptomes") # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end <- colnames(observations)[196:232]
+var_tt <- c(var_an_pheno, var_an, var_dormance, var_deb_to_flo, var_symptomes, var_deb_to_end)
+
+
+observations$cepage <- as.factor(observations$cepage)
+observations$region_viticole <- as.factor(observations$region_viticole)
+```
+
+### Sélection des variables
+
+Variables conservées :
+
+```{r}
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+corr_matrix <- cor(observations[ ,c("age_parcelle_estime","RU", "debourrement", "floraison",var_tt)])
+high_corr <- findCorrelation(corr_matrix, cutoff = 0.8, names = TRUE)
+
+
+score_var <- read.xlsx("../../data/resultats/r2_rmse_par_variable.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars <- c("age_parcelle_estime","RU", "debourrement", "floraison",var_tt)
+to_rm <- c()
+for(var1 in vars){
+  if(!var1 %in% to_rm){
+    for(var2 in setdiff(vars, c(var1, to_rm))){
+      if(cor(observations[,var1], observations[,var2]) > 0.8){
+        if(score_var[score_var$variable == var1, "rmse"] > score_var[score_var$variable == var1, "rmse"]){
+          to_rm <- c(to_rm, var1)
+          break
+        }
+        to_rm <- c(to_rm, var2)
+      }
+    }
+  }
+}
+
+to_keep <- c("cepage", "region_viticole",setdiff(vars, to_rm))
+to_keep
+
+features <- Matrix::sparse.model.matrix(~ cepage + region_viticole + . - 1, data = observations[,to_keep], sep = "_")
+```
+
+### Cross-validation :
+
+```{r, cache=TRUE, warning=FALSE}
+# XGBoost cross-validé :
+# Définition de la grille d’hyperparamètres
+# grid <- expand.grid(
+#   nrounds = c(100, 200, 500),
+#   max_depth = c(3, 6, 9, 12),
+#   eta = c(0.001, 0.01, 0.05, 0.1, 0.3),
+#   gamma = 0,
+#   colsample_bytree = 1,
+#   min_child_weight = 1,
+#   subsample = 1
+# )
+
+# Cross-validation
+# control <- trainControl(
+#   method = "cv",
+#   number = 10,
+#   verboseIter = FALSE
+# )
+
+# Entraînement
+# model_xgb_cv <- train(
+#   x = features,
+#   y = observations[, "pourcentage_esca"],
+#   method = "xgbTree",
+#   trControl = control,
+#   tuneGrid = grid
+# )
+# 
+# print("Meilleurs hyperparamètres :")
+# model_xgb_cv$bestTune
+```
+
+### Vérification de la convergence de l'entrainement :
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+nrs <- seq(20, 200, 10)
+rmses <- c()
+for(nr in nrs){
+  model_xgb = xgboost(data = as.matrix(features[i_train, ]), nround = nr, 
+                      objective= "count:poisson", # "reg:squarederror" 
+                      label= observations[i_train, "pourcentage_esca"],
+                      eta = 0.1,
+                      max_depth = 6,
+                      verbose = FALSE)  
+  rmses <- c(rmses, rmse(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,]))))
+}
+
+plot(nrs, rmses, xlab = "Nombre d'arbre", ylab = "RMSE", main = "RMSE entrainement en fonction de nombre d'arbre")
+
+print(paste("Nombre optimal d'arbre :", nrs[which(rmses == min(rmses))]))
+```
+
+### Création du modèle et score :
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+model_xgb = xgboost(data = as.matrix(features[i_train,]), nround = 100, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[i_train, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+plot(model_xgb$evaluation_log$train_poisson_nloglik, type = "l")
+print("RMSE entrainement :")
+rmse(observations$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train,])))
+print("Erreur moyenne absolue entrainement :")
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_xgb, as.matrix(features[i_train,]))))
+
+print("RMSE test :")
+rmse(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))
+print("Erreur moyenne absolue test :")
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))))
+
+plot(observations$pourcentage_esca[-i_train], abs(observations$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, test")
+
+plot(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])),
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, test")
+```
+
+### Valeur de Shapley : 
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+model_xgb = xgboost(data = as.matrix(features), nround = 100, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+shap = shap.score.rank(xgb_model = model_xgb, 
+                                   X_train = as.matrix(features),
+                                   shap_approx = F)
+var_importance(shap, top_n=10)
+
+## Prepare data for top N variables
+shap_long = shap.prep(shap = shap,
+                           X_train = as.matrix(features) , 
+                           top_n = 10
+                           )
+
+## Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+
+
+xgb.plot.shap(data = features, # input data
+              model = model_xgb, # xgboost model
+              features = names(shap$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+)
+```
+
+### Valeur de Shapley sur apprentissage +++ : 
+
+```{r, cache=TRUE}
+features <- observations[ ,-c(1, 2, 5, 6)]
+features <- Matrix::sparse.model.matrix(~ cepage + region_viticole + . - 1, data = features, sep = "_")
+model_xgb = xgboost(data = as.matrix(features), nround = 1000, 
+                     objective= "count:poisson", # "reg:squarederror" 
+                     label= observations[, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 100, 
+                    verbose = FALSE)  
+
+shap = shap.score.rank(xgb_model = model_xgb, 
+                                   X_train = as.matrix(features),
+                                   shap_approx = F)
+var_importance(shap, top_n=10)
+
+## Prepare data for top N variables
+shap_long = shap.prep(shap = shap,
+                           X_train = as.matrix(features) , 
+                           top_n = 10
+                           )
+
+## Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+
+
+xgb.plot.shap(data = features, # input data
+              model = model_xgb, # xgboost model
+              features = names(shap$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
