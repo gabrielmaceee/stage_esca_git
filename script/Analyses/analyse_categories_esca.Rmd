@@ -1,0 +1,174 @@
+---
+title: "Analyse des catégories d'esca"
+author: "Gabriel Macé"
+date: "2025-07-22"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+Le but de ce script écrit en R est 
+
+```{r}
+library(lme4)
+library(dplyr)
+library(ggplot2)
+library(Metrics) # RMSE
+library(openxlsx)
+library(caret) # cv et findCorrelation
+
+library(FactoMineR)
+library(factoextra)
+
+load("../../data/modelisation/observations_parcelles.RData")
+```
+
+```{r}
+observations$age_10_20 <- 0
+observations$age_10_20[observations$age_parcelle_estime <= 20] <- 1
+observations$age_20_30 <- 0
+observations$age_20_30[observations$age_parcelle_estime > 20] <- 1
+
+# Mettre les âges, les cépages et les régions en facteurs
+observations$cepage <- as.factor(observations$cepage)
+observations$region_viticole <- as.factor(observations$region_viticole)
+observations$age_10_20 <- as.factor(observations$age_10_20)
+observations$age_20_30 <- as.factor(observations$age_20_30)
+observations$age_parcelle_estime <- as.factor(observations$age_parcelle_estime)
+```
+
+```{r}
+# Récupération de la médiane d'esca par parcelle
+med_parcelle <- observations %>% group_by(identifiant_parcelle_analyse) %>% summarise(med_parcelle = median(pourcentage_esca))
+med_parcelle$esca_categoriel <- "[0;1["
+med_parcelle[med_parcelle$med_parcelle >= 1,]$esca_categoriel <- "[1;2["
+med_parcelle[med_parcelle$med_parcelle >= 2,]$esca_categoriel <- "[2;5["
+med_parcelle[med_parcelle$med_parcelle >= 5,]$esca_categoriel <- "[5;10["
+med_parcelle[med_parcelle$med_parcelle >= 10,]$esca_categoriel <- "[10;20["
+med_parcelle[med_parcelle$med_parcelle >= 20,]$esca_categoriel <- "[20;100["
+med_parcelle$esca_categoriel <- factor(med_parcelle$esca_categoriel, levels = c("[0;1[", "[1;2[", "[2;5[", "[5;10[", "[10;20[", "[20;100["))
+
+observations <- observations %>% left_join(med_parcelle[, c("identifiant_parcelle_analyse", "esca_categoriel")], by = "identifiant_parcelle_analyse")
+
+```
+
+```{r}
+res.afc<- MCA(observations[,c("cepage", "region_viticole", "age_10_20", "esca_categoriel")], quali.sup = "esca_categoriel", graph = FALSE, ncp = 20)
+```
+
+```{r}
+eig.val <- get_eigenvalue(res.afc)
+head(eig.val,100)
+```
+
+```{r}
+fviz_contrib(res.afc, choice = "var", axes = c(1:10), top = 30)
+fviz_cos2(res.afc, choice = "var", axes = c(1:10), top = 30)
+```
+
+```{r}
+fviz_mca_biplot(res.afc, geom.ind = "point", habillage = observations$esca_categoriel, palette = c("blue", "cyan", "green", "yellow", "orange", "red"), select.var =list (contrib = 10), ggtheme = theme_minimal ())
+```
+
+```{r}
+# H0 : les deux variables sont indépendantes
+quali = c("cepage", "region_viticole", "age_10_20", "age_parcelle_estime")
+p_value = c()
+chi2 = c()
+var1 = c()
+for(q in quali){
+  p_value = c(p_value,chisq.test(table(observations %>% pull(q), observations$esca_categoriel))$p.value)
+  chi2 = c(chi2,chisq.test(table(observations %>% pull(q), observations$esca_categoriel))$statistic)
+  var1 = c(var1, q)
+}
+res_chisq = data.frame(q1 = var1, chi2 = chi2, p_value = p_value, p_value_ajustée = p.adjust(p_value, method = "bonferroni", n = length(p_value)))
+res_chisq
+```
+
+```{r}
+plot(res_chisq$p_value_ajustée, pch = 20, main = "Tests chi2 d'indépendance", ylab = "pvaleur ajustées chi2")
+abline(h=0.05, col = "red")
+```
+
+
+```{r}
+quali = c("cepage", "region_viticole", "age_10_20")
+p_value = c()
+var1 = c()
+for(q in quali){
+  print(q)
+  print(round(prop.table(table(observations %>% pull(q), observations$esca_categoriel),1),2))
+}
+```
+
+```{r}
+library(rcompanion)
+quali = c("cepage", "region_viticole", "age_10_20", "age_parcelle_estime")
+p_value = c()
+var1 = c()
+for(q in quali){
+  print(q)
+  print(round(cramerV(table(observations %>% pull(q), observations$esca_categoriel)),3))
+}
+```
+
+```{r}
+quali = c("cepage", "region_viticole", "age_10_20")
+p_value = c()
+var1 = c()
+for(q in quali){
+  print(q)
+  heatmap(round(prop.table(table(observations %>% pull(q), observations$esca_categoriel),1),2), Rowv = NA, Colv = NA) 
+}
+```
+
+```{r}
+form <- as.formula(paste0("esca_categoriel ~", "(1|age_10_20) + (1|region_viticole) + (1|cepage)"))
+best_lm <- glmer(form, data = observations, family = "binomial")
+```
+
+```{r}
+round(prop.table(table(round(predict(best_lm, observations),0), observations$esca_categoriel),1),2)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+

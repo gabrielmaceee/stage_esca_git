@@ -1,0 +1,104 @@
+---
+title: "Comparaison phéno SAFRAN / DRIAS"
+author: "Gabriel Macé"
+date: "2025-04-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Inclure des tests stats pour comparer les périodes. (et eventuellement correction de p-valeurs)
+Pb différences individus observations / projections : regarder si projections et observations 2014-2023 proches, puis comparer que les projections ensuites pour les tests stats. Ou alors regarder les observations climatiques / simulations de phéno sur tous nos couples mailles / cépages, même si on n'observe pas l'esca tous les ans.
+
++ faire des cartes des projections moyennes par périodes.
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+

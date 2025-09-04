@@ -1,0 +1,750 @@
+---
+title: "gaussian process"
+author: "Gabriel Macé"
+date: "2025-06-02"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+
+Ce script écrit en python, a pour but d'explorer le potentiel de régression des processus gaussien appliqué à nos données.
+
+
+```{r}
+library(reticulate)
+
+# Dis à R d’utiliser le bon environnement Python
+use_python("C:/Users/Lucas/AppData/Local/r-miniconda/envs/bayesenv/python.exe", required = TRUE)
+```
+
+
+```{python}
+# Importation des bibliothèques nécessaires
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split,cross_val_score
+import pyreadr
+```
+
+### Préparation des données :
+
+```{python}
+# Chargement des données
+observations = pyreadr.read_r("../../data/modelisation/observations.RData")["observations"]
+observations = pd.DataFrame(observations)
+# observations = observations.loc[observations.region_viticole != "Jura"]
+# observations = observations.loc[observations.cepage == "cabernet sauvignon"]
+# observations = observations.loc[observations.pourcentage_esca != 0]
+# observations.loc[observations.pourcentage_esca > 12.5].pourcentage_esca = 12.5
+observations_20 = observations.loc[observations.pourcentage_esca < 20]
+```
+
+
+```{python}
+var_an_pheno = list(observations.columns[12:47]) # ne pas garder la longueur de la période = 365 ou 366
+var_an = list(observations.columns[49:84]) # ne pas garder la longueur de la période
+var_dormance = list(observations.columns[85:121])
+var_deb_to_flo = list(set(observations.columns[122:158]) - set(["sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"]))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes = list(set(observations.columns[159:195]) - set(["sum.frost.days.0.symptomes"])) # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end = list(observations.columns[196:232])
+
+var_tt = var_an_pheno + var_an + var_dormance + var_deb_to_flo + var_symptomes + var_deb_to_end
+
+observations['cepage'] = observations['cepage'].astype('category')
+observations['region_viticole'] = observations['region_viticole'].astype('category')
+```
+
+
+```{python}
+# Enlever les variables trop corrélées pour limiter le nombre de variables :
+
+score_var = pd.read_excel("../../data/resultats/r2_rmse_par_variable.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars = var_tt + list(["age_parcelle_estime", "RU", "debourrement", "floraison" ])
+to_rm = []
+for var1 in vars:
+    if var1 not in to_rm:
+        for var2 in list(set(vars) - set([var1] + to_rm)):
+            corr = np.corrcoef(observations[var1], observations[var2])[0, 1]
+            if corr > 0.8:
+                rmse1 = score_var.loc[score_var["variable"] == var1, "rmse"].values[0]
+                rmse2 = score_var.loc[score_var["variable"] == var2, "rmse"].values[0]
+                if rmse1 > rmse2:
+                    to_rm.append(var1)
+                else:
+                    to_rm.append(var2)
+                break
+
+
+to_keep = list(["cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+
+features = pd.get_dummies(observations[to_keep])
+```
+
+## Gaussian process :
+
+```{python, eval = FALSE}
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import *
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+to_use = ["cepage", "region_viticole", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.dormance", "swi.dormance", "auc_isv.symptomes", "tv.deb_end"]
+# to_use = list(set(vars) - set(to_rm))
+
+X = observations[to_use]#.drop_duplicates(keep='first')
+X = pd.get_dummies(X)
+y = observations['pourcentage_esca']#.loc[X.index]
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+# y_train = 2 * np.sqrt(y_train + 3/8) # Essaie de transformation loi de poisson en loi normale
+
+scaler = StandardScaler()
+var_cont = list(set(to_use) - set(["cepage", "region_viticole"]))
+X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+X_test[var_cont] = scaler.transform(X_test[var_cont])
+
+from sklearn.decomposition import PCA
+pca = PCA(n_components=12)  # n_components= 10 ou  12 ou 20, à tester
+X_train = pca.fit_transform(X_train)
+np.sum(pca.explained_variance_ratio_)
+
+X_test = pca.transform(X_test)
+```
+
+```{python, eval = FALSE}
+gpr_cv = GaussianProcessRegressor(kernel=Matern(),
+        random_state=0, normalize_y=True, alpha=0.5, n_restarts_optimizer=0).fit(X_train, y_train)
+# normalize_y = True, 'alpha': 0.5, 'kernel': Matern(length_scale=1, nu=1.5), test : rmse = 5, m.e = 3.2
+
+y_train_pred = gpr_cv.predict(X_train, return_std=True)
+y_test_pred = gpr_cv.predict(X_test, return_std=True)
+
+mean_prediction = y_test_pred[0]
+std_prediction =  y_test_pred[1]
+
+# mean_prediction = ((mean_prediction/2)**2) - 3/8
+# std_prediction = ((std_prediction/2)**2) - 3/8
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred[0])**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred[0])))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred[0])[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred[0])**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred[0])))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred[0])[0,1]**2)
+```
+
+
+```{python}
+# Vérification de l'inclusion dans l'intervalle
+within_interval = (y_test <= mean_prediction + 1.96 * std_prediction) & (y_test >= mean_prediction - 1.96 * std_prediction)
+n_within = np.sum(within_interval)
+
+print(f"Nombre d'observations dans l'intervalle [0.025, 0.975] : {n_within} / {len(y_test)} = {n_within / len(y_test)}")
+
+# y_test.loc[std_prediction >=3.5]
+```
+
+```{python}
+# Graphique des intervalles de prédictions :
+y_test_srt = pd.Series(y_test.reset_index(drop=True))
+# y_test_srt = y_test_srt.sort_values()
+mean_prediction = y_test_pred[0]
+mean_prediction = pd.Series(mean_prediction).sort_values()
+std_prediction =  y_test_pred[1]
+
+fig, ax = plt.subplots()
+x = range(0, len(y_test_srt))
+# ax.plot(x, mean_prediction[y_test_srt.index])
+ax.scatter(x, mean_prediction - 1.96 * std_prediction, color='blue', s=1)
+ax.scatter(x, mean_prediction + 1.96 * std_prediction, color='green', s=1)
+# ax.set_ylim(ymin=0)
+ax.set_title('')
+fig.autofmt_xdate(rotation=45)
+ax.scatter(x, y_test_srt[mean_prediction.index], color='r', s=1)
+plt.show()
+```
+
+```{python}
+# Graphique des intervalles de prédictions :
+y_train_srt = pd.Series(y_train.reset_index(drop=True))
+# y_train_srt = y_train_srt.sort_values()
+mean_prediction = y_train_pred[0]
+mean_prediction = pd.Series(mean_prediction).sort_values()
+std_prediction =  y_train_pred[1]
+
+fig, ax = plt.subplots()
+x = range(0, len(y_train_srt))
+# ax.plot(x, mean_prediction[y_train_srt.index])
+ax.scatter(x, mean_prediction - 1.96 * std_prediction, color='blue', s=1)
+ax.scatter(x, mean_prediction + 1.96 * std_prediction, color='green', s=1)
+# ax.set_ylim(ymin=0)
+ax.set_title('')
+fig.autofmt_xdate(rotation=45)
+ax.scatter(x, y_train_srt[mean_prediction.index], color='r', s=1)
+plt.show()
+```
+
+```{python}
+# Graphique des erreurs :
+plt.clf()
+erreur = np.abs(y_test - y_test_pred[0])
+plt.scatter(y_test, erreur, s=1)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.axvline(x=12.5, color='r')
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+
+plt.clf()
+plt.scatter(y_test, y_test_pred[0], s=1)
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+
+plt.clf()
+sns.kdeplot(erreur, fill=True, color="skyblue")
+plt.title("Densité des erreurs absolues")
+plt.xlabel("Erreur absolue")
+plt.ylabel("Densité")
+plt.grid(True)
+plt.show()
+```
+
+
+```{python}
+# Nombre d'erreurs > 10 par région, cépage.
+observations.loc[y_train[np.abs(y_train - y_train_pred[0])>10].index].region_viticole.value_counts()
+observations.loc[y_train[np.abs(y_train - y_train_pred[0])>10].index].cepage.value_counts()
+# observations.loc[y_test[np.abs(y_test - y_test_pred[0])>10].index].pourcentage_esca.value_counts()
+# y_test_pred[0][np.abs(y_test - y_test_pred[0])>10]
+```
+
+
+```{python}
+observations.groupby(['region_viticole', 'cepage'], observed=True).size()
+# observations.groupby(['cepage', 'region_viticole'], observed=True).size()
+```
+
+```{python}
+# Nombre d'erreurs > 5 par région, cépage.
+observations.loc[y_test[np.abs(y_test - y_test_pred[0])>5].index].region_viticole.value_counts()
+observations.loc[y_test[np.abs(y_test - y_test_pred[0])>5].index].cepage.value_counts()
+observations.loc[y_test[np.abs(y_test - y_test_pred[0])>5].index].groupby(['region_viticole', 'cepage'], observed=True).size()
+# observations.loc[y_test[np.abs(y_test - y_test_pred[0])>10].index].pourcentage_esca.value_counts()
+# y_test_pred[0][np.abs(y_test - y_test_pred[0])>10]
+```
+
+### Séparer les incidence fortes incidences
+
+Essaie : Ne marche pas du tout
+
+```{python}
+observations.pourcentage_esca.loc[observations.pourcentage_esca >= 15] = 15
+
+to_use = ["cepage", "region_viticole", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.dormance", "swi.dormance", "auc_isv.symptomes", "tv.deb_end"]
+# to_use = list(set(vars) - set(to_rm))
+
+X = observations[to_use]#.drop_duplicates(keep='first')
+X = pd.get_dummies(X)
+y = observations['pourcentage_esca']#.loc[X.index]
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+scaler = StandardScaler()
+var_cont = list(set(to_use) - set(["cepage", "region_viticole"]))
+X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+X_test[var_cont] = scaler.transform(X_test[var_cont])
+
+from sklearn.decomposition import PCA
+pca = PCA(n_components=12)  # n_components= 10 ou  12 ou 20, à tester
+X_train = pca.fit_transform(X_train)
+np.sum(pca.explained_variance_ratio_)
+
+X_test = pca.transform(X_test)
+```
+
+```{python, eval = FALSE}
+gpr_cv = GaussianProcessRegressor(kernel=Matern(),
+        random_state=0, normalize_y=True, alpha=0.5, n_restarts_optimizer=0).fit(X_train, y_train)
+
+y_train_pred = gpr_cv.predict(X_train, return_std=True)
+y_test_pred = gpr_cv.predict(X_test, return_std=True)
+```
+
+```{python}
+# Regarder quelles observations sont prédites >= 14 :
+observations.loc[y_test[y_test_pred[0] >= 14].index].pourcentage_esca.value_counts() #77
+len(y_test[y_test==15])
+```
+
+```{python}
+# Graphique des intervalles de prédictions :
+y_test_srt = pd.Series(y_test.reset_index(drop=True))
+# y_test_srt = y_test_srt.sort_values()
+mean_prediction = y_test_pred[0]
+mean_prediction = pd.Series(mean_prediction).sort_values()
+std_prediction =  y_test_pred[1]
+
+fig, ax = plt.subplots()
+x = range(0, len(y_test_srt))
+ax.scatter(x, mean_prediction - 1.96 * std_prediction, color='blue', s=1)
+ax.scatter(x, mean_prediction + 1.96 * std_prediction, color='green', s=1)
+ax.set_title('')
+fig.autofmt_xdate(rotation=45)
+ax.scatter(x, y_test_srt[mean_prediction.index], color='r', s=1)
+plt.show()
+```
+
+```{python}
+# Graphique des intervalles de prédictions :
+y_train_srt = pd.Series(y_train.reset_index(drop=True))
+# y_train_srt = y_train_srt.sort_values()
+mean_prediction = y_train_pred[0]
+mean_prediction = pd.Series(mean_prediction).sort_values()
+std_prediction =  y_train_pred[1]
+
+fig, ax = plt.subplots()
+x = range(0, len(y_train_srt))
+# ax.plot(x, mean_prediction[y_train_srt.index])
+ax.scatter(x, mean_prediction - 1.96 * std_prediction, color='blue', s=1)
+ax.scatter(x, mean_prediction + 1.96 * std_prediction, color='green', s=1)
+# ax.set_ylim(ymin=0)
+ax.set_title('')
+fig.autofmt_xdate(rotation=45)
+ax.scatter(x, y_train_srt[mean_prediction.index], color='r', s=1)
+plt.show()
+```
+
+
+## Gaussian process sur incidence < 20 :
+
+Sans les fortes incidences, il y a beaucoup moins de fortes erreurs.
+
+```{python}
+# Enlever les variables trop corrélées pour limiter le nombre de variables :
+
+score_var = pd.read_excel("../../data/resultats/r2_rmse_par_variable_20.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars = var_tt + list(["age_parcelle_estime", "RU", "debourrement", "floraison" ])
+to_rm = []
+for var1 in vars:
+    if var1 not in to_rm:
+        for var2 in list(set(vars) - set([var1] + to_rm)):
+            corr = np.corrcoef(observations_20[var1], observations_20[var2])[0, 1]
+            if corr > 0.8:
+                rmse1 = score_var.loc[score_var["variable"] == var1, "rmse"].values[0]
+                rmse2 = score_var.loc[score_var["variable"] == var2, "rmse"].values[0]
+                if rmse1 > rmse2:
+                    to_rm.append(var1)
+                else:
+                    to_rm.append(var2)
+                break
+
+
+to_keep = list(["cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+
+features = pd.get_dummies(observations_20[to_keep])
+```
+
+
+### Réduction de la dimension
+
+Les processus gaussiens ont du mal à utiliser plus que 12 variables prédictives.
+
+```{python, eval = FALSE}
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+to_use = ["cepage", "region_viticole", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.symptomes", "isv.deb_flo", "sum.heat.days.30.dormance", "isv.sev.seq.10.symptomes"]
+# Ou : to_use = to_keep
+# to_use = to_keep
+X = observations_20[to_use]
+X = pd.get_dummies(X)
+y = observations_20['pourcentage_esca']
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+scaler = StandardScaler()
+var_cont = list(set(to_use) - set(["cepage", "region_viticole"]))
+X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+X_test[var_cont] = scaler.transform(X_test[var_cont])
+
+from sklearn.decomposition import PCA
+pca = PCA(n_components=12)  # ou 12 ou 20, à tester
+X_train = pca.fit_transform(X_train)
+np.sum(pca.explained_variance_ratio_)
+
+X_test = pca.transform(X_test)
+```
+
+### Cross-validation :
+
+```{python, eval = FALSE}
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import *
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # Noyau des covariances
+    'kernel': [DotProduct() + WhiteKernel(), RBF(), RationalQuadratic(), Matern(), 1**2 * RBF(length_scale=1)], # , ExpSineSquared()
+    
+    # Covariance des erreurs
+    'alpha': [0.05, 0.1, 0.5, 1, 1.25, 1.5, 2]
+}
+
+# Création de l'objet GridSearch
+model = GaussianProcessRegressor(normalize_y=True)
+grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=1, verbose=0)
+```
+
+
+```{python, eval = FALSE}
+# ! Attention : long !
+# Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+
+# Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+# Best parameters found:  {'alpha': 0.5, 'kernel': Matern(length_scale=1, nu=1.5)}
+```
+
+
+```{python, eval = FALSE}
+gpr_cv = GaussianProcessRegressor(kernel=Matern(),
+        random_state=0, normalize_y=True, alpha=0.25, n_restarts_optimizer=0).fit(X_train, y_train)
+# normalize_y = True, 'alpha': 0.5, 'kernel': Matern(length_scale=1, nu=1.5), test : rmse = 3.8, m.e = 2.8
+
+# RationalQuadratic = pareil mais avec un meilleur intervalle
+# 0.25 = meilleur ic (0.89)
+y_train_pred = gpr_cv.predict(X_train, return_std=True)
+y_test_pred = gpr_cv.predict(X_test, return_std=True)
+
+# DotProduct() + WhiteKernel() : alpha = 0.1 : test : rmse = 4.1, m.e = 3.1
+# Meilleur IC (0.93) encore car grande écart type
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred[0])**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred[0])))
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred[0])**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred[0])))
+```
+
+
+### Intervalle de prédiction :
+
+```{python}
+mean_prediction = y_test_pred[0]
+std_prediction =  y_test_pred[1]
+
+# Vérification de l'inclusion dans l'intervalle
+within_interval = (y_test <= mean_prediction + 1.96 * std_prediction) & (y_test >= mean_prediction - 1.96 * std_prediction)
+n_within = np.sum(within_interval)
+
+print(f"Nombre d'observations dans l'intervalle [0.025, 0.975] : {n_within} / {len(y_test)} = {n_within / len(y_test)}")
+y_test_srt = pd.Series(y_test.reset_index(drop=True))
+y_test_srt = y_test_srt.loc[mean_prediction < 15]
+y_test_srt = y_test_srt.sort_values()
+
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test_srt - mean_prediction[y_test_srt.index])**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test_srt - mean_prediction[y_test_srt.index])))
+```
+
+```{python}
+# Graphique des intervalles de prédictions :
+fig, ax = plt.subplots()
+ax.plot(range(0, len(y_test_srt)), mean_prediction[y_test_srt.index])
+ax.fill_between(range(0, len(y_test_srt)), mean_prediction[y_test_srt.index] - 1.96 * std_prediction[y_test_srt.index], mean_prediction[y_test_srt.index] + 1.96 * std_prediction[y_test_srt.index], color='b', alpha=.15)
+ax.set_ylim(ymin=0)
+ax.set_title('')
+fig.autofmt_xdate(rotation=45)
+ax.plot(range(0, len(y_test_srt)), y_test_srt, color='r', linestyle='--', lw=1)
+plt.show()
+```
+
+
+```{python}
+# Graphique des intervalles de prédictions :
+x = range(0, len(y_test_srt))
+plt.figure(figsize=(12, 6))
+plt.plot(x, y_test_srt, label='Vraies valeurs', color='black', linestyle='--')
+plt.plot(x, mean_prediction[y_test_srt.index], label='Prédictions', color='blue')
+plt.fill_between(x, mean_prediction[y_test_srt.index] - 1.96 * std_prediction[y_test_srt.index], mean_prediction[y_test_srt.index] + 1.96 * std_prediction[y_test_srt.index], color='blue', alpha=0.2, label='Intervalle de confiance 95%')
+# plt.scatter(x, y_test_srt, color='black', label='Vraies valeurs', alpha=0.7)
+# plt.errorbar(x, mean_prediction[y_test_srt.index], yerr=1.96*std_prediction[y_test_srt.index], fmt='o', color='blue', ecolor='lightblue',
+#              elinewidth=2, capsize=3, label='Prédictions ± IC 95%')
+plt.legend()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('Prédictions avec intervalle de confiance')
+plt.grid(True)
+plt.show()
+```
+
+
+## Gaussian process sur incidence > 0 :
+
+Enlever les incidences nulles ne change pas grand chose aux erreurs du modèles.
+
+### Réduction de la dimension
+
+```{python, eval = FALSE}
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+to_use = list(["cepage", "region_viticole", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.dormance", "swi.dormance", "auc_isv.symptomes", "tv.deb_end"])
+X = observations_0[to_keep] # to_keep
+X = pd.get_dummies(X)
+
+scaler = StandardScaler()
+var_cont = list(set(vars) - set(to_rm))
+# var_cont = list(set(to_use) - set(["cepage", "region_viticole"]))
+X[var_cont] = scaler.fit_transform(X[var_cont])
+
+y = observations_0['pourcentage_esca']
+
+from sklearn.decomposition import PCA
+pca = PCA(n_components=12)  # ou 12 ou 20, à tester
+X_reduced = pca.fit_transform(X)
+np.sum(pca.explained_variance_ratio_)
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X_reduced, y, test_size=0.2)
+```
+
+### Cross-validation :
+
+```{python, eval = FALSE}
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import *
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # Noyau des covariances
+    'kernel': [DotProduct() + WhiteKernel(), RBF(), RationalQuadratic(), Matern(), ExpSineSquared(), 1**2 * RBF(length_scale=1)],
+    
+    # Covariance des erreurs
+    'alpha': [0.05, 0.1, 1, 1.25, 1.5, 2],
+}
+
+# Création de l'objet GridSearch
+model = GaussianProcessRegressor(normalize_y=True)
+grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=1, verbose=0)
+```
+
+```{python, eval = FALSE}
+# ! Attention long !
+# Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+
+```{python, eval = FALSE}
+gpr_cv = GaussianProcessRegressor(kernel=Matern(length_scale=1, nu=1.5),
+        random_state=0, normalize_y=True, alpha=0.5, n_restarts_optimizer=0).fit(X_train, y_train)
+y_train_pred = gpr_cv.predict(X_train, return_std=True)
+y_test_pred = gpr_cv.predict(X_test, return_std=True)
+
+# Variable sélectionnées :
+# Mattern, alpha = 0.5 : 5.3, 3.5
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred[0])**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred[0])))
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred[0])**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred[0])))
+```
+
+
+## Gaussian process via normalisation :
+
+Essaie de transformation des incidences : loi de poisson vers une loi normale. (Très empirique)
+
+### Réduction de la dimension
+
+```{python, eval = FALSE}
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import PowerTransformer, QuantileTransformer
+to_use = list(["cepage", "region_viticole", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.dormance", "swi.dormance", "auc_isv.symptomes", "tv.deb_end"])
+X = observations[to_use] # to_keep
+X = pd.get_dummies(X)
+
+scaler = StandardScaler()
+# var_cont = list(set(vars) - set(to_rm))
+var_cont = list(set(to_use) - set(["cepage", "region_viticole"]))
+X[var_cont] = scaler.fit_transform(X[var_cont])
+
+pt = PowerTransformer(method = 'yeo-johnson') # method {‘yeo-johnson’, ‘box-cox’}
+y = pd.DataFrame(observations['pourcentage_esca']) # + 1e-10
+y = pt.fit_transform(y)
+
+# qt = QuantileTransformer(n_quantiles=10, random_state=0)
+# y = qt.fit_transform(y)
+
+sns.displot(y, kind="kde")
+plt.title('Density Plot')
+plt.xlabel('Incidence esca normalisé')
+plt.ylabel('Density')
+plt.show()
+
+from sklearn.decomposition import PCA
+pca = PCA(n_components=12)  # ou 12 ou 20, à tester
+X_reduced = pca.fit_transform(X)
+np.sum(pca.explained_variance_ratio_)
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X_reduced, y, test_size=0.2)
+```
+
+### Cross-validation :
+
+```{python, eval = FALSE}
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import *
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # Noyau des covariances
+    'kernel': [DotProduct() + WhiteKernel(), RBF(), RationalQuadratic(), Matern(), ExpSineSquared(), 1**2 * RBF(length_scale=1)],
+    
+    # Covariance des erreurs
+    'alpha': [0.05, 0.1, 1, 1.25, 1.5, 2],
+}
+
+# Création de l'objet GridSearch
+model = GaussianProcessRegressor(normalize_y=False) # Pas besoin de centrée les y
+grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=1, verbose=0)
+```
+
+```{python, eval = FALSE}
+# Entraînement du modèle avec GridSearch
+grid_search.fit(X_train, y_train)
+
+# Affichage des meilleurs paramètres
+print("Best parameters found: ", grid_search.best_params_)
+```
+
+
+```{python, eval = FALSE}
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X_reduced, y, test_size=0.2)
+gpr_cv = GaussianProcessRegressor(kernel=Matern(length_scale=1, nu=1.5),
+        random_state=0, normalize_y=True, alpha=0.5, n_restarts_optimizer=1)
+# Mattern, alpha = 0.5, box cox : 6, 3.5
+# Mattern, alpha = 0.5, yeo-johnson : 5.5, 3.3
+
+# Variable sélectionnées :
+# Mattern, alpha = 0.5, yeo-johnson : 5.0, 3.0
+
+gpr_cv.fit(X_train, y_train)
+y_train_pred = gpr_cv.predict(X_train, return_std=True)
+y_train_pred = pt.inverse_transform(y_train_pred[0].reshape(-1, 1)) #- 1e-10# ou qt
+y_test_pred = gpr_cv.predict(X_test, return_std=True)
+y_test_pred = pt.inverse_transform(y_test_pred[0].reshape(-1, 1)) #- 1e-10
+y_train = pt.inverse_transform(y_train) #- 1e-10
+y_test = pt.inverse_transform(y_test) #- 1e-10
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+```
+
+### Test poisson bayésien
+
+Vraiment pas efficace.
+
+```{python}
+# import pymc as pm
+# import arviz as az
+# 
+# with pm.Model() as model:
+#     # Priors
+#     alpha = pm.Normal('alpha', mu=0, sigma=10)
+#     beta = pm.Normal('beta', mu=0, sigma=1, shape=X_train.shape[1])
+#     
+#     # Lien log
+#     mu = pm.math.exp(alpha + pm.math.dot(X_train, beta))
+#     
+#     # Likelihood Poisson
+#     y_obs = pm.Poisson('y_obs', mu=mu, observed=y_train.values)
+#     
+#     # Inférence
+#     trace = pm.sample(10000, tune=5000, target_accept=0.9)
+#     ppc = pm.sample_posterior_predictive(trace, model=model)
+# 
+# 
+# y_pred = ppc.posterior_predictive["y_obs"].mean(dim=("chain", "draw"))
+# 
+# np.mean(np.abs(y_train - y_pred))
+# np.sqrt(np.mean((y_train - y_pred) ** 2))
+# 
+# hdi = ppc.posterior_predictive["y_obs"].quantile([0.025, 0.975], dim=("chain", "draw"))
+# low = hdi.sel(quantile=0.025)
+# high = hdi.sel(quantile=0.975)
+# np.mean((y_train >= low) & (y_train <= high))
+```
