@@ -1,0 +1,807 @@
+---
+title: "Exploration des simulations"
+author: "Gabriel Macé"
+date: "2025-05-05"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+```{r, include = FALSE}
+library(ggplot2)
+library(plotly) # Graphs intéractifs
+library(dplyr)
+library(terra)
+library(tidyterra)
+load("../../data/modelisation/observations.RData")
+load("../../data/modelisation/observations_2019_2021.RData")
+```
+
+
+Rapides représentations graphiques des distributions des données simulées.
+
+La jointure étant faite avec les données d'observations d'ESCA, il y a des répétitions dans les simulations car nous avons plusieurs observations de parcelles pour certains individus maille / cépage /année.
+
+Cartographies intéractives de certaines variables.
+
+## Distributions des variables :
+
+### Par année phéno :
+
+```{r}
+data_counts_an <- observations %>%
+   group_by(annee) %>%
+   summarise(n = n(), .groups = "drop")
+
+for(col in colnames(observations)[8:47][-3]){
+  p <- ggplot(data = observations, aes(x = as.factor(annee), y = !!sym(col))) +
+    geom_boxplot() +
+    geom_text(data = data_counts_an, aes(x = as.factor(annee), y =  max(observations[,col]*1.1, na.rm = TRUE), 
+                                         label = n), 
+              position = position_dodge(width = 0.75), size = 3) +
+    theme(axis.text.x = element_text(angle = 90, size = 9)) +
+    labs(x = "Année", y = col,
+         title = paste("Distribution de", col, "par année phéno"))
+  plot(p)
+}
+```
+
+Chaque année est différente, mais aucune variable ne semble suivre de tendance périodique.
+
+### Par cépage :
+
+```{r}
+data_counts_cepage <- observations %>%
+   group_by(cepage) %>%
+   summarise(n = n(), .groups = "drop")
+
+for(col in colnames(observations)[8:47][-3]){
+  p <- ggplot(data = observations, aes(x = reorder(cepage, !!sym(col)), y = !!sym(col), group = cepage)) +
+    geom_boxplot() +
+    geom_text(data = data_counts_cepage, aes(x = cepage, y =  max(observations[,col]*1.1, na.rm = TRUE), 
+                                         label = n), 
+              position = position_dodge(width = 0.75), size = 3)  +
+    theme(axis.text.x = element_text(angle = 90, size = 9)) +
+    labs(x = "Cépage", y = col,
+         title = paste("Distribution de", col, "par cépage"))
+  plot(p)
+}
+```
+
+On peut observer que certains cépages sont plus présents dans des mailles froides, chaudes, humides ou séches.
+Les températures par cépages semblent anti-corrélées aux dates des stades phénologiques -> les différences de phénologies entre cépages sont peut être surtout liées aux différences de météorologie aux quels ils sont exposés.
+
+Pour la moyenne des précipitations quotidiennes et le SWI, 3 cépages se séparent : trousseau, poulsard, et savagnin; or le savagnin et le trousseau sont les deux cépages avec l'incidence moyenne d'esca la plus forte.
+
+
+### Par période phénologique :
+
+Sur toutes les observations (5489).
+
+```{r}
+# for(col in colnames(observations)[12:47]){
+#   df <- data.frame(obs = c(observations[,paste0(col, ".dormance")], observations[,paste0(col, ".deb_flo")], observations[,paste0(col, ".symptomes")]), periode = c(rep("Dormance", dim(observations)[1]), rep("Deb_flo", dim(observations)[1]), rep("Symptomes", dim(observations)[1])))
+#   df$periode <- factor(df$periode, levels = unique(df$periode))
+#     
+#   p <- ggplot(data = df, aes(x = as.factor(periode), y = obs, group = periode)) +
+#     geom_boxplot() +
+#     theme(axis.text.x = element_text(angle = 90, size = 9)) +
+#     labs(x = "Périodes", y = col,
+#          title = paste("Distribution de", col, "par périodes phénologiques"))
+#   plot(p)
+# }
+```
+
+
+```{r}
+for(col in colnames(observations)[12:47]){
+  to_plot <- observations %>%
+  pivot_longer(cols = c(paste0(col, ".dormance"), paste0(col, ".deb_flo"), paste0(col, ".symptomes")), 
+               names_to = "variable", 
+               values_to = "value") %>%
+  mutate(variable = factor(variable, levels = c(paste0(col, ".dormance"), paste0(col, ".deb_flo"), paste0(col, ".symptomes"))))  # -1 pour exclure 'id'
+
+# Graphique
+# ggplot(to_plot, aes(x = id, y = value)) +
+#   geom_line() +
+#   facet_wrap(~ variable, scales = "free_y") +
+#   theme_minimal()
+  
+  p <- ggplot(data = to_plot, aes(x = as.factor(annee), y = value)) +
+    geom_boxplot() +
+    facet_wrap(~ variable) +
+    theme(axis.text.x = element_text(angle = 90, size = 9)) +
+    labs(x = "Année", y = col,
+         title = paste("Distribution de", col, "par année selon la période"))
+  plot(p)
+}
+```
+
+## Variables du bilan hydrique : 
+
+### Période d'après floraison :
+
+2019 fut une année très sèche.
+2021 fut une année très humide.
+
+```{r}
+for(var1 in c("ftsw", "swi", "tv", "isv")){
+plot(
+observations_2019_2021 %>% filter(doy > floraison, doy < 244)%>% 
+  group_by(annee, doy) %>%
+  summarise(
+    moy_jour = mean(.data[[var1]], na.rm = TRUE),
+    lower_95 = quantile(.data[[var1]], 0.025, na.rm = TRUE),
+    upper_95 = quantile(.data[[var1]], 0.975, na.rm = TRUE)
+  ) %>%
+  ggplot(aes(x = doy, y = moy_jour)) +
+  geom_line(color = "#0073C2", linewidth = 0.8) +
+  geom_ribbon(aes(ymin = lower_95, ymax = upper_95), fill = "#0073C2", alpha = 0.2) +
+  facet_wrap(~ annee, scales = "free_y") +  # même échelle sur chaque graphique
+  labs(
+    title = paste(var1, ", de la floraison au 31/08 (2019 et 2021)"),
+    x = "Jour de l'année (DOY)",
+    y = var1
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18),
+    axis.title.x = element_text(margin = margin(t = 10)),
+    axis.title.y = element_text(margin = margin(r = 10)))
+  )
+}
+```
+
+
+### Lien avec la température
+
+Nous prendrons à partir de maintenant les valeurs moyennes obtenus sur les années "phénologiques" : de septembre à septembre :
+
+```{r}
+for(var1 in c("ftsw", "swi", "tv", "isv")){
+  print(paste("Corrélation entre les températures moyennes et", var1, ":", 
+              cor(observations$tm, observations[,var1])))
+  plot(ggplot(data = observations, aes_string(x = "tm", y = var1)) + geom_point() +
+      labs(title = paste(var1, " en fonction de la température moyenne")))
+}
+```
+
+
+### Lien avec la pluie
+
+```{r}
+for(var1 in c("ftsw", "swi", "tv", "isv")){
+  print(paste("Corrélation entre les précipitations moyennes et", var1, ":", 
+              cor(observations$rr, observations[,var1])))
+  plot(ggplot(data = observations, aes_string(x = "rr", y = var1)) + geom_point() +
+      labs(title = paste(var1, "en fonction des précipitations moyennes")))
+}
+```
+
+
+
+
+### SWI (SAFRAN) vs FTSW (bilan hydrique) :
+
+```{r}
+print(paste("Corrélation entre le SWI et le FTSW :", 
+              cor(observations$swi, observations$ftsw)))
+plot(ggplot(data = observations, aes(x = swi, y = ftsw)) + geom_point() +
+      labs(title = paste("ftsw en fonction de swi")))
+```
+
+Ces deux variables semblent très corrélées malgré une forte variabilité.
+
+## Cartes :
+
+```{r}
+# Récupération contour France : 
+limites_france <- vect("../../data/geographie/france_poly_limits.shp")
+limites_france <- project(limites_france, "EPSG:2154")
+safran_grid <- project(vect("../../data/geographie/maille_safran.shp"), "EPSG:2154")
+mailles_communes <- read.csv("../../data/geographie/correspondance_maille_commune.csv", sep = ",")
+mailles_communes$X_maille <- mailles_communes$X_maille*100
+mailles_communes$Y_maille <- mailles_communes$Y_maille*100
+
+safran_grid <- safran_grid %>% left_join(mailles_communes[,c("ID_MAILLE", "RU", "region_viticole")], by = c("ID" = "ID_MAILLE"), relationship = "one-to-one", multiple = "any")
+safran_grid <- safran_grid %>% filter(! is.na(RU))
+```
+
+### Région viticole :
+
+```{r}
+plot <- ggplot(data = safran_grid) +
+  geom_spatvector(aes(fill = region_viticole, color = region_viticole, text = paste("ID:", ID, "<br>Région viticole:", region_viticole)))  +
+  labs(title = "Région viticole par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Région viticole"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text")
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_region_viticole.html")
+```
+
+
+
+### Réserve utile :
+
+```{r}
+plot <- ggplot(data = safran_grid) +
+  geom_spatvector(aes(fill = RU, color = RU, text = paste("ID:", ID, "<br>RU:", RU)))  +
+  scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(safran_grid$RU), median(safran_grid$RU), max(safran_grid$RU))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(safran_grid$RU), median(safran_grid$RU), max(safran_grid$RU))),
+    space = "Lab") +
+  labs(title = "Réserve utile initiale par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Réserve utile"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text")
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_réserves_utiles.html")
+```
+
+Les réserves utiles initiales semblent moins importantes dans le jura et en provence.
+
+```{r}
+# Jointure avec les observations
+safran_grid <- safran_grid %>% left_join(observations, by = c("ID" = "ID_MAILLE"), 
+                                         relationship = "one-to-many")
+```
+
+
+### Cépage :
+
+```{r}
+plot <- ggplot(data = safran_grid) +
+  geom_spatvector(aes(fill = cepage, color = cepage, frame = cepage, text = paste("ID:", ID, "<br>Cépages:", cepage)))  +
+  labs(title = "Maille par cépage") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Cépage"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0.01) %>% 
+  animation_slider(currentvalue = list(prefix = "" , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_cepage.html")
+```
+
+### ISV : 
+
+```{r}
+to_plot <- safran_grid %>%
+  group_by(ID, X, Y, annee) %>%
+  summarise(isv = mean(isv), isv.dormance = mean(isv.dormance), isv.deb_flo = mean(isv.deb_flo), isv.symptomes = mean(isv.symptomes)) %>% 
+  pivot_longer(cols = c("isv.dormance", "isv.deb_flo", "isv.symptomes"), 
+               names_to = "variable", 
+               values_to = "value") %>%
+  mutate(variable = factor(variable, levels = c("isv.dormance", "isv.deb_flo", "isv.symptomes")))
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = isv, color = isv, frame = annee, text = paste("ID:", ID, "<br>ISV:", isv)))  +
+  scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$isv), median(to_plot$isv), max(to_plot$isv))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$isv), median(to_plot$isv), max(to_plot$isv))),
+    space = "Lab") +
+  labs(title = "ISV moyen par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "ISV"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_isv.html")
+```
+
+```{r}
+plot <-  to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = value, color = value, frame = annee, text = paste("ID:", ID, "<br>ISV:", value)))  +
+  facet_wrap(~ variable) +
+  scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  labs(title = "ISV moyen par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "ISV"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = NA)
+
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+```
+
+### Température moyenne : 
+
+```{r}
+to_plot <- safran_grid %>%
+  group_by(ID, X, Y, annee) %>%
+  summarise(tm = mean(tm), tm.dormance = mean(tm.dormance), tm.deb_flo = mean(tm.deb_flo), tm.symptomes = mean(tm.symptomes)) %>% 
+  pivot_longer(cols = c("tm.dormance", "tm.deb_flo", "tm.symptomes"), 
+               names_to = "variable", 
+               values_to = "value") %>%
+  mutate(variable = factor(variable, levels = c("tm.dormance", "tm.deb_flo", "tm.symptomes")))
+
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = tm, color = tm, frame = annee , text = paste("ID:", ID, "<br>Température moyenne:", tm)))  +
+    scale_color_gradientn(colors = c("blue3", "white", "red2"), 
+    values = scales::rescale(c(min(to_plot$tm), median(to_plot$tm), max(to_plot$tm))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("blue3", "white", "red2"), 
+    values = scales::rescale(c(min(to_plot$tm), median(to_plot$tm), max(to_plot$tm))),
+    space = "Lab") +
+  labs(title = "Température moyenne moyenne par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Température moyenne"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_temperature_moyenne.html")
+```
+
+```{r}
+plot <-  to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = value, color = value, frame = annee, text = paste("ID:", ID, "<br>Température moyenne:", value)))  +
+  facet_wrap(~ variable) +
+    scale_color_gradientn(colors = c("blue3", "white", "red2"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("blue3", "white", "red2"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  labs(title = "Température moyenne par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Température moyenne"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = NA)
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+```
+
+### Humidité relative : 
+
+```{r}
+to_plot <- safran_grid %>%
+  group_by(ID, X, Y, annee) %>%
+  summarise(hu = mean(hu), hu.dormance = mean(hu.dormance), hu.deb_flo = mean(hu.deb_flo), hu.symptomes = mean(hu.symptomes)) %>% 
+  pivot_longer(cols = c("hu.dormance", "hu.deb_flo", "hu.symptomes"), 
+               names_to = "variable", 
+               values_to = "value") %>%
+  mutate(variable = factor(variable, levels = c("hu.dormance", "hu.deb_flo", "hu.symptomes")))
+
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = hu, color = hu, frame = annee, text = paste("ID:", ID, "<br>Humidité relative:", hu)))  +
+    scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$hu), median(to_plot$hu), max(to_plot$hu))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$hu), median(to_plot$hu), max(to_plot$hu))),
+    space = "Lab") +
+  labs(title = "Humidité relative moyenne par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Humidité relative"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_humidite_relative.html")
+```
+
+
+```{r}
+plot <-  to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = value, color = value, frame = annee, text = paste("ID:", ID, "<br>Humidité relative:", value)))  +
+  facet_wrap(~ variable) +
+    scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  labs(title = "Humidité relative moyenne par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Humidité relative"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = NA)
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+```
+
+### VPD : 
+
+```{r}
+to_plot <- safran_grid %>%
+  group_by(ID, X, Y, annee) %>%
+  summarise(VPD = mean(VPD), VPD.dormance = mean(VPD.dormance), VPD.deb_flo = mean(VPD.deb_flo), VPD.symptomes = mean(VPD.symptomes)) %>% 
+  pivot_longer(cols = c("VPD.dormance", "VPD.deb_flo", "VPD.symptomes"), 
+               names_to = "variable", 
+               values_to = "value") %>%
+  mutate(variable = factor(variable, levels = c("VPD.dormance", "VPD.deb_flo", "VPD.symptomes")))
+
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = VPD, color = VPD, frame = annee, text = paste("ID:", ID, "<br>VPDmidité relative:", VPD)))  +
+      scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$VPD), median(to_plot$VPD), max(to_plot$VPD))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$VPD), median(to_plot$VPD), max(to_plot$VPD))),
+    space = "Lab") +
+  labs(title = "VPD moyen par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "VPD"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_vpd.html")
+```
+
+```{r}
+plot <-  to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = value, color = value, frame = annee, text = paste("ID:", ID, "<br>VPD:", value)))  +
+  facet_wrap(~ variable) +
+    scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  labs(title = "VPD moyen par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "VPD"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = NA)
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+```
+
+
+
+### Précipitations : 
+
+```{r}
+to_plot <- safran_grid %>%
+  group_by(ID, X, Y, annee) %>%
+  summarise(pluie = mean(rr), pluie.dormance = mean(rr.dormance), pluie.deb_flo = mean(rr.deb_flo), pluie.symptomes = mean(rr.symptomes)) %>% 
+  pivot_longer(cols = c("pluie.dormance", "pluie.deb_flo", "pluie.symptomes"), 
+               names_to = "variable", 
+               values_to = "value") %>%
+  mutate(variable = factor(variable, levels = c("pluie.dormance", "pluie.deb_flo", "pluie.symptomes")))
+
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = pluie, color = pluie, frame = annee, text = paste("ID:", ID, "<br>Précipitations:", pluie)))  +
+    scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$pluie), median(to_plot$pluie), max(to_plot$pluie))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$pluie), median(to_plot$pluie), max(to_plot$pluie))),
+    space = "Lab") +
+  labs(title = "Précipitations moyennes par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Précipitations moyennes"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# plot <- safran_grid |>
+#   group_by(ID, X, Y) |>
+#   summarise(pluie = mean(rain.days, na.rm = TRUE)) %>% 
+#   ggplot() +
+#   geom_spatvector(aes(fill = pluie), color = "transparent")  +
+#   scale_fill_gradient2(high = "blue", low = "red", mid = "white", midpoint = median(observations$rain.days), limit = c(min(observations$rain.days), max(observations$rain.days)), space = "Lab") +
+#   geom_spatvector_text(aes(label = ID, label1 = pluie), size = 1, color = "transparent") +
+#   labs(fill = "Précipitations moyennes")+
+#   labs(title = "Précipitations moyenne par maille")
+# plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_precipitations.html")
+```
+
+
+```{r}
+plot <-  to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = value, color = value, frame = annee, text = paste("ID:", ID, "<br>Précipitations:", value)))  +
+  facet_wrap(~ variable) +
+    scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  labs(title = "Précipitations moyennes par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Précipitations moyennes"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = NA)
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+```
+
+### Transpiration de la vigne : 
+
+```{r}
+to_plot <- safran_grid %>%
+  group_by(ID, X, Y, annee) %>%
+  summarise(transpiration = mean(tv), transpiration.dormance = mean(tv.dormance), transpiration.deb_flo = mean(tv.deb_flo), transpiration.symptomes = mean(tv.symptomes)) %>% 
+  pivot_longer(cols = c("transpiration.dormance", "transpiration.deb_flo", "transpiration.symptomes"), 
+               names_to = "variable", 
+               values_to = "value") %>%
+  mutate(variable = factor(variable, levels = c("transpiration.dormance", "transpiration.deb_flo", "transpiration.symptomes")))
+
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = transpiration, color = transpiration, frame = annee, text = paste("ID:", ID, "<br>transpiration:", transpiration)))  +
+    scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$transpiration), median(to_plot$transpiration), max(to_plot$transpiration))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$transpiration), median(to_plot$transpiration), max(to_plot$transpiration))),
+    space = "Lab") +
+  labs(title = "Transpiration moyenne par maille")+
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "transpiration"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_transpiration.html")
+```
+
+```{r}
+plot <-  to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = value, color = value, frame = annee, text = paste("ID:", ID, "<br>transpiration:", value)))  +
+  facet_wrap(~ variable) +
+    scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$value), median(to_plot$value), max(to_plot$value))),
+    space = "Lab") +
+  labs(title = "Transpiration moyenne par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Transpiration moyenne"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = NA)
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+```
+
+### Dates de débourrement : 
+
+```{r}
+to_plot <- safran_grid |>
+  group_by(ID, X, Y, annee) |>
+  summarise(debourrement = mean(debourrement, na.rm = TRUE))
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = debourrement, color = debourrement, frame = annee, text = paste("ID:", ID, "<br>Débourrement:", debourrement)))  +
+    scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$debourrement), median(to_plot$debourrement), max(to_plot$debourrement))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$debourrement), median(to_plot$debourrement), max(to_plot$debourrement))),
+    space = "Lab") +
+  labs(title = "Date de débourrement moyenne par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Débourrement"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_debourrement.html")
+```
+
+
+### Dates de floraison : 
+
+```{r}
+to_plot <- safran_grid |>
+  group_by(ID, X, Y, annee) |>
+  summarise(floraison = mean(floraison, na.rm = TRUE))
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = floraison, color = floraison, frame = annee, text = paste("ID:", ID, "<br>Floraison:", floraison)))  +
+    scale_color_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$floraison), median(to_plot$floraison), max(to_plot$floraison))),
+    space = "Lab") +
+  scale_fill_gradientn(colors = c("red2", "white", "blue3"), 
+    values = scales::rescale(c(min(to_plot$floraison), median(to_plot$floraison), max(to_plot$floraison))),
+    space = "Lab") +
+  labs(title = "Date de floraison moyenne par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Floraison"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_floraison.html")
+```
+
+
+
+Les différentes variables semblent varier selon les régions :
+
+- L'ISV semble plus proche de zéro dans le sud (plus de stress hydrique), même il existe beaucoup de variabilités locales.
+
+- Plus on est au sud, plus les températures moyennes sont fortes (et donc les stades phénologiques précoces) et la transpiraton de la vigne faible.
+
+- Les précipitations semblent plus importantes dans le jura.
+
+- La Bourgogne et la Champagne semblent les régions viticoles où les vignes transpirent le plus.
+
+### Incidence esca : 
+
+```{r}
+to_plot <- safran_grid |>
+  group_by(ID, X, Y, annee) |>
+  summarise(esca = mean(pourcentage_esca, na.rm = TRUE))
+
+col = c("darkblue", "darkcyan", "forestgreen","yellow","orange","red2")
+
+to_plot$int <- "[0;1["
+to_plot[to_plot$esca >= 1,]$int <- "[1;2[" 
+to_plot[to_plot$esca >= 2,]$int <- "[2;5["
+to_plot[to_plot$esca >= 5,]$int <- "[5;10["
+to_plot[to_plot$esca >= 10,]$int <- "[10;2["
+to_plot[to_plot$esca >= 20,]$int <- "[20;100["
+to_plot$int <- factor(to_plot$int, levels = c("[0;1[", "[1;2[", "[2;5[", "[5;10[", "[10;20[", "[20;100["))
+
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = int, color = int, frame = annee, text = paste("ID:", ID, "<br>Incidence esca:", esca)))  +
+  scale_fill_manual(values = c("[0;1[" = col[1], "[1;2[" = col[2], "[2;5[" = col[3], "[5;10[" = col[4], "[10;20[" = col[5], "[20;100[" = col[6])) +
+  scale_color_manual(values = c("[0;1[" = col[1], "[1;2[" = col[2], "[2;5[" = col[3], "[5;10[" = col[4], "[10;20[" = col[5], "[20;100[" = col[6])) +
+  labs(title = "Incidence d'esca moyenne par maille") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Incidence esca"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+# plot
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+# Afficher la carte interactive
+plotly_plot
+htmlwidgets::saveWidget( widget = plotly_plot, file =  "../../graphs/carto/carte_incidence_esca.html")
+```
+
+L'incidence d'esca semble lié à la région viticole : Les incidences sont faibles en champagne, en bourgogne, et dans les côtes du Rhone. Elle semble forte dans le jura (mais il pourrait exister un biais de représentativité dans cette région).
+
+```{r}
+observations %>% group_by(region_viticole) %>% summarise(median_esca = median(pourcentage_esca), mean_esca = mean(pourcentage_esca))
+```
+
+
+

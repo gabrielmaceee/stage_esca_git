@@ -1,0 +1,659 @@
+---
+title: "Colinéarité"
+author: "Gabriel Macé"
+date: "2025-05-06"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+Le but de ce script est de repérer les colinéarités inter-variables de nos données et les répétitions inter périodes.
+
+```{r}
+library(ggplot2)
+library(plotly) # Graphs intéractifs
+library(dplyr)
+library(tidyr)
+library(stats)
+# library(reshape2) # Pour les matrices de corrélation
+library(openxlsx)
+library(corrplot)
+library(Hmisc) # rcorr
+load("../../data/modelisation/observations.RData")
+```
+
+```{r}
+# Vérif du nombre de valeurs par variables
+# for(var in colnames(observations)[11:216]){
+#   if(length(unique(observations[,var]))==1) print(var)
+# }
+# sum.heat.days.35.deb_flo, "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo",
+# "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo
+# sum.frost.days.0.symptomes  :  1 -> que des 0
+```
+
+```{r}
+# plot(observations$isv.deb_end * (244-observations$debourrement), observations$auc_isv.deb_end)
+# cor(observations$isv.deb_end * (244-observations$debourrement), observations$auc_isv.deb_end)
+# l'auc de l'isv représente la moyenne de l'isv * la taille de la période
+```
+
+```{r}
+# récupération des variables par type de période :
+# Enlever tm car lié directement à tx et tn, 
+# et la taille des périodes car constantes ou liée aux stades phéno
+var_an_pheno <- colnames(observations)[11:47][-c(1,4)]
+var_an <- colnames(observations)[48:84][-c(1,4)]
+var_dormance <- colnames(observations)[85:121][-c(1,4)]
+var_deb_to_flo <- setdiff(colnames(observations)[122:158][-c(1,4)] , c("sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes <- setdiff(colnames(observations)[159:195][-c(1,4)], "sum.frost.days.0.symptomes") # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end <- colnames(observations)[196:232][-c(1,4)]
+var_tt <- c("RU", "debourrement", "floraison", var_an_pheno, var_an, var_dormance, var_deb_to_flo, var_symptomes, var_deb_to_end)
+```
+
+! NB : J'ai enlevé les températures moyennes car elles dépendent directement des températures minimum et maximum.
+J'ai enlevé la somme des jours où la tempéarature est > à 35 pour la période du débourrement à la floraison, et la somme des jours où il a gelé pour la période d'observations des symptomes, car elles sont toujours égales à 0.
+
+# Matrice de corrélation par périodes
+
+```{r}
+corcol <- colorRampPalette(c("blue2", "white", "red2"))
+
+# Corrélation année phéno :
+data2plot <- observations[,c("RU" ,"debourrement", "floraison", var_an_pheno)]
+cor.mat <- t(cor(data2plot))
+pval.mat <- t(rcorr(as.matrix(data2plot), type = "pearson")[["P"]])
+corrplot(cor.mat, 
+               type="upper",       # forme du diagramme 'lower', 'upper', 'full', 'flatten'
+               method="ellipse",  # méthode graphique
+               col=corcol(200),   # couleur
+               p.mat = pval.mat, 
+               sig.level = 0.05, insig = "blank", # niveau de p-value ; case blanche quand p-val <
+               diag=F,             # enleve la diagonal ou coeff de correlation = 1
+               tl.col = "black",   # couleur du texte
+               tl.cex=0.5,         # taille du texte
+               tl.srt=55,          # inclinaison du texte
+               mar=c(0,0,1,0),     # pour ne pas couper le titre
+               cl.lim=c(-1,1),     # limites de la barre du coefficient R
+               title= "Corrélation année phénologique")     
+
+
+# Corrélation année calendaire :
+data2plot <- observations[,c("RU" ,"debourrement", "floraison", var_an)]
+cor.mat <- t(cor(data2plot))
+pval.mat <- t(rcorr(as.matrix(data2plot), type = "pearson")[["P"]])
+corrplot(cor.mat, 
+               type="upper",       # forme du diagramme 'lower', 'upper', 'full', 'flatten'
+               method="ellipse",  # méthode graphique
+               col=corcol(200),   # couleur
+               p.mat = pval.mat, 
+               sig.level = 0.05, insig = "blank", # niveau de p-value ; case blanche quand p-val <
+               diag=F,             # enleve la diagonal ou coeff de correlation = 1
+               tl.col = "black",   # couleur du texte
+               tl.cex=0.5,         # taille du texte
+               tl.srt=55,          # inclinaison du texte
+               mar=c(0,0,1,0),     # pour ne pas couper le titre
+               cl.lim=c(-1,1),     # limites de la barre du coefficient R
+               title= "Corrélation année calendaire")     
+
+
+# Corrélation dormance :
+data2plot <- observations[,c("RU" ,"debourrement", "floraison", var_dormance)]
+cor.mat <- t(cor(data2plot))
+pval.mat <- t(rcorr(as.matrix(data2plot), type = "pearson")[["P"]])
+corrplot(cor.mat, 
+               type="upper",       # forme du diagramme 'lower', 'upper', 'full', 'flatten'
+               method="ellipse",  # méthode graphique
+               col=corcol(200),   # couleur
+               p.mat = pval.mat, 
+               sig.level = 0.05, insig = "blank", # niveau de p-value ; case blanche quand p-val <
+               diag=F,             # enleve la diagonal ou coeff de correlation = 1
+               tl.col = "black",   # couleur du texte
+               tl.cex=0.5,         # taille du texte
+               tl.srt=55,          # inclinaison du texte
+               mar=c(0,0,1,0),     # pour ne pas couper le titre
+               cl.lim=c(-1,1),     # limites de la barre du coefficient R
+               title= "Corrélation dormance") 
+
+# Corrélation débourrement à floraison :
+data2plot <- observations[,c("RU" ,"debourrement", "floraison", var_deb_to_flo)]
+cor.mat <- t(cor(data2plot))
+pval.mat <- t(rcorr(as.matrix(data2plot), type = "pearson")[["P"]])
+corrplot(cor.mat, 
+               type="upper",       # forme du diagramme 'lower', 'upper', 'full', 'flatten'
+               method="ellipse",  # méthode graphique
+               col=corcol(200),   # couleur
+               p.mat = pval.mat, 
+               sig.level = 0.05, insig = "blank", # niveau de p-value ; case blanche quand p-val <
+               diag=F,             # enleve la diagonal ou coeff de correlation = 1
+               tl.col = "black",   # couleur du texte
+               tl.cex=0.5,         # taille du texte
+               tl.srt=55,          # inclinaison du texte
+               mar=c(0,0,1,0),     # pour ne pas couper le titre
+               cl.lim=c(-1,1),     # limites de la barre du coefficient R
+               title= "Corrélation débourrement à floraison") 
+
+
+# Corrélation floraison au 31 août :
+data2plot <- observations[,c("RU" ,"debourrement", "floraison", var_symptomes)]
+cor.mat <- t(cor(data2plot))
+pval.mat <- t(rcorr(as.matrix(data2plot), type = "pearson")[["P"]])
+corrplot(cor.mat, 
+               type="upper",       # forme du diagramme 'lower', 'upper', 'full', 'flatten'
+               method="ellipse",  # méthode graphique
+               col=corcol(200),   # couleur
+               p.mat = pval.mat, 
+               sig.level = 0.05, insig = "blank", # niveau de p-value ; case blanche quand p-val <
+               diag=F,             # enleve la diagonal ou coeff de correlation = 1
+               tl.col = "black",   # couleur du texte
+               tl.cex=0.5,         # taille du texte
+               tl.srt=55,          # inclinaison du texte
+               mar=c(0,0,1,0),     # pour ne pas couper le titre
+               cl.lim=c(-1,1),     # limites de la barre du coefficient R
+               title= "Corrélation floraison au 31 août") 
+
+# Corrélation débourrement au 31 août :
+data2plot <- observations[,c("RU" ,"debourrement", "floraison", var_deb_to_end)]
+cor.mat <- t(cor(data2plot))
+pval.mat <- t(rcorr(as.matrix(data2plot), type = "pearson")[["P"]])
+corrplot(cor.mat, 
+               type="upper",       # forme du diagramme 'lower', 'upper', 'full', 'flatten'
+               method="ellipse",  # méthode graphique
+               col=corcol(200),   # couleur
+               p.mat = pval.mat, 
+               sig.level = 0.05, insig = "blank", # niveau de p-value ; case blanche quand p-val <
+               diag=F,             # enleve la diagonal ou coeff de correlation = 1
+               tl.col = "black",   # couleur du texte
+               tl.cex=0.5,         # taille du texte
+               tl.srt=55,          # inclinaison du texte
+               mar=c(0,0,1,0),     # pour ne pas couper le titre
+               cl.lim=c(-1,1),     # limites de la barre du coefficient R
+               title= "Corrélation débourrement au 31 août") 
+```
+
+# Tests de corrélation des variables quantitatives
+
+Pour essayer de quantifier les liens linéaires entre nos variables quantitatives, nous procéderons à des tests de corrélations et des régressions linéaires, utiliserons la correction de Benjamini Hochberg pour corriger les p-valeurs afin d'éviter au maximum le risque de première espèce (rejeter à tort l'hypothèse nulle), et extrairons les pvaleurs, le r2 et la corrélation.
+
+### L'ensemble des variables
+
+```{r}
+# lm : H0 : X n'a pas d'effet sur Y
+p_value_correlation = c()
+co = c()
+p_value_lm = c()
+var1 = c()
+var2 = c()
+r2 = c()
+var2skip = c()
+for(q in var_tt){
+  var2skip = c(var2skip, q)
+  for(q2 in setdiff(var_tt,var2skip)){
+    if(q != q2){
+      ct = cor.test(as.numeric(observations %>% pull(q)), as.numeric(observations %>% pull(q2)), method = "spearman")
+      p_value_correlation = c(p_value_correlation, ct$p.value)
+      p_value_lm = c(p_value_lm,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$coefficients["observations %>% pull(q)", "Pr(>|t|)"]) # q explique q2
+      r2 =  c(r2,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$r.squared)
+      co = c(co, ct$estimate)
+      var1 = c(var1, q)
+      var2 = c(var2, q2)
+    }
+  }
+}
+res_corr_tt = data.frame(var1 = var1, var2 = var2, correlation = round(co,3), p_value_corr = p.adjust(p_value_correlation, method = "BH", n = length(p_value_correlation)), r2 = round(r2,3), p_value_lm_ajustée = p.adjust(p_value_lm, method = "BH", n = length(p_value_lm)))
+
+write.xlsx(arrange(res_corr_tt,  -r2), "../../data/resultats/correlations_totales.xlsx", row.names=FALSE)
+```
+
+```{r}
+# print("Les variables très corrélées entre elles (r2 et corrélations > 0.9) :")
+# res_corr_tt[res_corr_tt$p_value_corr <= 0.05 & res_corr_tt$p_value_lm_ajustée <= 0.05 &
+#            abs(res_corr_tt$correlation) > 0.9 & res_corr_tt$r2 > 0.9,]
+```
+
+Beaucoup de corrélations des mêmes variables mais entre les périodes.
+
+
+# Tests de corrélation des variables quantitatives par période
+
+A partir d'ici, nous regarderons que les couples de variables où les p-valeurs sont inférieurs à 0.05, le r² et la valeur absolue de la corrélation supérieurs à 0.7.
+
+### Année phénologique
+
+```{r}
+# lm : H0 : X n'a pas d'effet sur Y
+p_value_correlation = c()
+co = c()
+p_value_lm = c()
+var1 = c()
+var2 = c()
+r2 = c()
+var2skip = c()
+for(q in c(var_an_pheno,"debourrement", "floraison", "RU")){
+  var2skip = c(var2skip, q)
+  for(q2 in setdiff(c(var_an_pheno, "debourrement", "floraison", "RU"),var2skip)){
+    if(q != q2){
+      ct = cor.test(as.numeric(observations %>% pull(q)), as.numeric(observations %>% pull(q2)), method = "spearman")
+      p_value_correlation = c(p_value_correlation, ct$p.value)
+      p_value_lm = c(p_value_lm,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$coefficients["observations %>% pull(q)", "Pr(>|t|)"]) # q explique q2
+      r2 =  c(r2,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$r.squared)
+      co = c(co, ct$estimate)
+      var1 = c(var1, q)
+      var2 = c(var2, q2)
+    }
+  }
+}
+res_corr = data.frame(var1 = var1, var2 = var2, correlation = round(co,3), p_value_corr = p.adjust(p_value_correlation, method = "BH", n = length(p_value_correlation)), r2 = round(r2,3), p_value_lm_ajustée = p.adjust(p_value_lm, method = "BH", n = length(p_value_lm)))
+
+write.xlsx(arrange(res_corr,  -r2), "../../data/resultats/correlations_an_pheno.xlsx", row.names=FALSE)
+# res_corr
+# print("vif debourrement : ") # à quelle point c'est facile de prédire le débourrement par régression linéaire
+# print(vif(lm(debourrement~.-debourrement, data = observations[,c(var_an_pheno, "debourrement", "floraison")])))
+# 
+# print("vif floraison : ") # à quelle point c'est facile de prédire la floraison par régression linéaire
+# print(vif(lm(floraison~.-floraison, data = observations[,c(var_an_pheno, "debourrement", "floraison")])))
+```
+
+```{r}
+res_corr[res_corr$p_value_corr <= 0.05 & res_corr$p_value_lm_ajustée <= 0.05 & 
+           abs(res_corr$correlation) > 0.7 & res_corr$r2 > 0.7,]
+```
+
+bhv = bh, pareil avec bh0 sauf après floraison, très corrélés à RU (sauf après floraison).
+
+SWI très corrélés aux précipitations
+
+Enlever tn, et0, sum.heat.days.25 et 30, garder que tx (ou tm). Aussi très corrélés aux phéno.
+
+Enlever hu, garder vpd.
+
+Enlever ftsw, garder isv.
+
+Sum.days.isv.sev très corrélé à isv.seq.5, 10, et 15 (eux mêmes corrélées entre eux), et à isv.
+
+
+```{r}
+# Ajouter qualitativement si il y a corrélation, pour colorer le graphique :
+res_corr$corr <- "Non"
+res_corr$corr[res_corr$r2 > 0.7 & res_corr$correlation > 0.7 & res_corr$p_value_lm_ajustée < 0.05 & res_corr$p_value_corr < 0.05] <- "Positive"
+res_corr$corr[res_corr$r2 > 0.7 & res_corr$correlation < 0.7 & res_corr$p_value_lm_ajustée < 0.05 & res_corr$p_value_corr < 0.05] <- "Négative"
+
+mycolors <- c("blue", "red", "black")
+names(mycolors) <- c("Négative", "Positive", "Non")
+
+plot <- res_corr %>% 
+  ggplot(aes(x = correlation, y = r2, color = corr, 
+             text = paste("Var1:", var1, "<br>Var2:", var2, "<br>r2:", r2, "<br>Corr:", correlation))) + 
+  geom_point() +
+  #scale_color_manual(values=c("blue", "black", "red")) +
+  # geom_vline(xintercept=c(-0.5, 0.5), col="red") +
+  # geom_hline(yintercept=0.5, col="grey") + 
+  scale_colour_manual(values = mycolors) 
+  #geom_text(aes(label = var1, label1 = var2), size = 1, color = "transparent")
+  
+plotly_plot <- ggplotly(plot, tooltip = "text")
+plotly_plot
+```
+
+
+Dans ce graphique seuls les couples de variables seules les couples de variables ayant un r² > 0.7, une valeur absolue de corrélaion > 0.7, et des p-valeurs < 0.05 sont représentées en couleur.
+
+### Année calendaire
+
+```{r}
+# lm : H0 : X n'a pas d'effet sur Y
+p_value_correlation = c()
+co = c()
+p_value_lm = c()
+var1 = c()
+var2 = c()
+r2 = c()
+var2skip = c()
+for(q in c(var_an,"debourrement", "floraison", "RU")){
+  var2skip = c(var2skip, q)
+  for(q2 in setdiff(c(var_an, "debourrement", "floraison", "RU"),var2skip)){
+    if(q != q2){
+      ct = cor.test(as.numeric(observations %>% pull(q)), as.numeric(observations %>% pull(q2)), method = "spearman")
+      p_value_correlation = c(p_value_correlation, ct$p.value)
+      p_value_lm = c(p_value_lm,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$coefficients["observations %>% pull(q)", "Pr(>|t|)"]) # q explique q2
+      r2 =  c(r2,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$r.squared)
+      co = c(co, ct$estimate)
+      var1 = c(var1, q)
+      var2 = c(var2, q2)
+    }
+  }
+}
+res_corr = data.frame(var1 = var1, var2 = var2, correlation = round(co,3), p_value_corr = p.adjust(p_value_correlation, method = "BH", n = length(p_value_correlation)), r2 = round(r2,3), p_value_lm_ajustée = p.adjust(p_value_lm, method = "BH", n = length(p_value_lm)))
+write.xlsx(arrange(res_corr,  -r2), "../../data/resultats/correlations_an.xlsx", row.names=FALSE)
+```
+
+```{r}
+res_corr[res_corr$p_value_corr <= 0.05 & res_corr$p_value_lm_ajustée <= 0.05 & 
+           abs(res_corr$correlation) > 0.7 & res_corr$r2 > 0.7,]
+```
+
+
+
+### Dormance
+
+```{r}
+# lm : H0 : X n'a pas d'effet sur Y
+p_value_correlation = c()
+co = c()
+p_value_lm = c()
+var1 = c()
+var2 = c()
+r2 = c()
+var2skip = c()
+for(q in c(var_dormance,"debourrement", "floraison", "RU")){
+  var2skip = c(var2skip, q)
+  for(q2 in setdiff(c(var_dormance, "debourrement", "floraison", "RU"),var2skip)){
+    if(q != q2){
+      ct = cor.test(as.numeric(observations %>% pull(q)), as.numeric(observations %>% pull(q2)), method = "spearman")
+      p_value_correlation = c(p_value_correlation, ct$p.value)
+      p_value_lm = c(p_value_lm,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$coefficients["observations %>% pull(q)", "Pr(>|t|)"]) # q explique q2
+      r2 =  c(r2,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$r.squared)
+      co = c(co, ct$estimate)
+      var1 = c(var1, q)
+      var2 = c(var2, q2)
+    }
+  }
+}
+res_corr = data.frame(var1 = var1, var2 = var2, correlation = round(co,3), p_value_corr = p.adjust(p_value_correlation, method = "BH", n = length(p_value_correlation)), r2 = round(r2,3), p_value_lm_ajustée = p.adjust(p_value_lm, method = "BH", n = length(p_value_lm)))
+write.xlsx(arrange(res_corr,  -r2), "../../data/resultats/correlations_dormance.xlsx", row.names=FALSE)
+```
+
+```{r}
+res_corr[res_corr$p_value_corr <= 0.05 & res_corr$p_value_lm_ajustée <= 0.05 & 
+           abs(res_corr$correlation) > 0.7 & res_corr$r2 > 0.7,]
+```
+
+
+### Débourrement à floraison
+
+```{r}
+# lm : H0 : X n'a pas d'effet sur Y
+p_value_correlation = c()
+co = c()
+p_value_lm = c()
+var1 = c()
+var2 = c()
+r2 = c()
+var2skip = c()
+for(q in c(var_deb_to_flo,"debourrement", "floraison", "RU")){
+  var2skip = c(var2skip, q)
+  for(q2 in setdiff(c(var_deb_to_flo, "debourrement", "floraison", "RU"),var2skip)){
+    if(q != q2){
+      ct = cor.test(as.numeric(observations %>% pull(q)), as.numeric(observations %>% pull(q2)), method = "spearman")
+      p_value_correlation = c(p_value_correlation, ct$p.value)
+      p_value_lm = c(p_value_lm,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$coefficients["observations %>% pull(q)", "Pr(>|t|)"]) # q explique q2
+      r2 =  c(r2,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$r.squared)
+      co = c(co, ct$estimate)
+      var1 = c(var1, q)
+      var2 = c(var2, q2)
+    }
+  }
+}
+res_corr = data.frame(var1 = var1, var2 = var2, correlation = round(co,3), p_value_corr = p.adjust(p_value_correlation, method = "BH", n = length(p_value_correlation)), r2 = round(r2,3), p_value_lm_ajustée = p.adjust(p_value_lm, method = "BH", n = length(p_value_lm)))
+write.xlsx(arrange(res_corr,  -r2), "../../data/resultats/correlations_deb_to_flo.xlsx", row.names=FALSE)
+```
+
+```{r}
+res_corr[res_corr$p_value_corr <= 0.05 & res_corr$p_value_lm_ajustée <= 0.05 & 
+           abs(res_corr$correlation) > 0.7 & res_corr$r2 > 0.7,]
+```
+
+
+### Période d'observations des symptômes
+
+```{r}
+# lm : H0 : X n'a pas d'effet sur Y
+p_value_correlation = c()
+co = c()
+p_value_lm = c()
+var1 = c()
+var2 = c()
+r2 = c()
+var2skip = c()
+for(q in c(var_symptomes,"debourrement", "floraison", "RU")){
+  var2skip = c(var2skip, q)
+  for(q2 in setdiff(c(var_symptomes, "debourrement", "floraison", "RU"),var2skip)){
+    if(q != q2){
+      ct = cor.test(as.numeric(observations %>% pull(q)), as.numeric(observations %>% pull(q2)), method = "spearman")
+      p_value_correlation = c(p_value_correlation, ct$p.value)
+      p_value_lm = c(p_value_lm,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$coefficients["observations %>% pull(q)", "Pr(>|t|)"]) # q explique q2
+      r2 =  c(r2,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$r.squared)
+      co = c(co, ct$estimate)
+      var1 = c(var1, q)
+      var2 = c(var2, q2)
+    }
+  }
+}
+res_corr = data.frame(var1 = var1, var2 = var2, correlation = round(co,3), p_value_corr = p.adjust(p_value_correlation, method = "BH", n = length(p_value_correlation)), r2 = round(r2,3), p_value_lm_ajustée = p.adjust(p_value_lm, method = "BH", n = length(p_value_lm)))
+write.xlsx(arrange(res_corr,  -r2), "../../data/resultats/correlations_symptomes.xlsx", row.names=FALSE)
+```
+
+```{r}
+res_corr[res_corr$p_value_corr <= 0.05 & res_corr$p_value_lm_ajustée <= 0.05 & 
+           abs(res_corr$correlation) > 0.7 & res_corr$r2 > 0.7,]
+```
+
+### Débourrement au 31/08
+
+```{r}
+# lm : H0 : X n'a pas d'effet sur Y
+p_value_correlation = c()
+co = c()
+p_value_lm = c()
+var1 = c()
+var2 = c()
+r2 = c()
+var2skip = c()
+for(q in c(var_deb_to_end,"debourrement", "floraison", "RU")){
+  var2skip = c(var2skip, q)
+  for(q2 in setdiff(c(var_deb_to_end, "debourrement", "floraison", "RU"),var2skip)){
+    if(q != q2){
+      ct = cor.test(as.numeric(observations %>% pull(q)), as.numeric(observations %>% pull(q2)), method = "spearman")
+      p_value_correlation = c(p_value_correlation, ct$p.value)
+      p_value_lm = c(p_value_lm,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$coefficients["observations %>% pull(q)", "Pr(>|t|)"]) # q explique q2
+      r2 =  c(r2,summary(lm(observations %>% pull(q2)~observations %>% pull(q)))$r.squared)
+      co = c(co, ct$estimate)
+      var1 = c(var1, q)
+      var2 = c(var2, q2)
+    }
+  }
+}
+res_corr = data.frame(var1 = var1, var2 = var2, correlation = round(co,3), p_value_corr = p.adjust(p_value_correlation, method = "BH", n = length(p_value_correlation)), r2 = round(r2,3), p_value_lm_ajustée = p.adjust(p_value_lm, method = "BH", n = length(p_value_lm)))
+write.xlsx(arrange(res_corr,  -r2), "../../data/resultats/correlations_deb_to_end.xlsx", row.names=FALSE)
+```
+
+```{r}
+res_corr[res_corr$p_value_corr <= 0.05 & res_corr$p_value_lm_ajustée <= 0.05 & 
+           abs(res_corr$correlation) > 0.7 & res_corr$r2 > 0.7,]
+```
+
+Les mêmes variables semblent plus ou moins corrélées à travers toutes les périodes.
+
+-> Faire des ACP par périodes pour confirmer tout ça.
+
+# Comparaison par périodes
+
+### Comparaison de toutes les périodes en même temps
+
+Nous allons utiliser ici utiliser une anova pour tester l'égalité des moyennes, le test de Bartlett pour tester l'homogénéité des variances, et la correction de Benjamini Hochberg pour corriger les p-valeurs afin d'éviter au maximum le risque de première espèce (rejeter à tort l'hypothèse nulle).
+
+```{r}
+delete <- which(colnames(observations)[12:47][-3] %in% c("sum.heat.days.35", "isv.faible.seq.15", "isv.fai_mod.seq.15", "isv.mod_sev.seq.10", "isv.mod_sev.seq.15", "sum.frost.days.0"))
+
+p_value_aov = c() # H0 : égalité des moyennes
+p_value_bart = c() # H0 : Homogénéité des variances
+var = c()
+n = dim(observations)[1]
+
+
+for(i in 1:29){
+  valeurs <- c(observations[,var_an_pheno[-c(delete)][i]], observations[,var_an[-c(delete)][i]], observations[,var_dormance[-c(delete)][i]],
+               observations[,var_deb_to_flo[-c(20)][i]], observations[,var_symptomes[-c(delete[-1]-1)][i]], observations[,var_deb_to_end[-c(delete)][i]])
+  
+  # Créer le facteur correspondant
+  groupes <- factor(c(
+    rep("an_pheno", n),
+    rep("an", n),
+    rep("dormance", n),
+    rep("deb_to_flo", n),
+    rep("symptomes", n),
+    rep("deb_to_end", n)
+  ))
+      p_value_aov = c(p_value_aov, summary(aov(valeurs ~ groupes))[[1]][["Pr(>F)"]][1])
+      p_value_bart = c(p_value_bart, bartlett.test(valeurs ~ groupes)$p.value)
+      var = c(var, var_an_pheno[-c(delete)][i])
+}
+res_diff = data.frame(var = var,  p_value_anova = p_value_aov, p_value_anova_ajustée = p.adjust(p_value_aov, method = "BH", n = length(p_value_aov)), p_value_bartlett = p_value_bart, p_value_bartlett_ajustée = p.adjust(p_value_bart, method = "BH", n = length(p_value_bart)))
+
+```
+
+
+
+```{r}
+# On ne rejette pas l'égalité des périodes
+print( paste( "Nombre de variables où l'on rejette les deux hypothèses nulles :", dim(res_diff[res_diff$p_value_anova_ajustée < 0.05 & res_diff$p_value_bartlett_ajustée < 0.05,])[1]))
+# Sur 29 variables
+```
+
+Au seuil 5%, on rejette toutes les égalités des moyennes et d'homogénéité des variances ! Les variables semblent bien différentes selon les périodes.
+
+Tous les résultats des tests étant significatifs, on peut comparer les périodes 2 par 2.
+
+### Comparaison des périodes 2 par 2
+
+Nous allons faire la même chose que précedemment mais en comparant les périodes 2 par 2.
+
+```{r, warning=FALSE}
+periodes <- c("an_pheno", "an", "dormance", "deb_to_flo", "symptomes", "deb_to_end")
+p_value_aov <- c()
+p_value_bart <- c()
+p_value_correlation <- c()
+corr <- c()
+per1 <- c()
+per2 <- c()
+var <- c()
+fc <- c()
+
+for(i in 1:22){
+  valeurs <- c(observations[,var_an_pheno[-c(delete)][i]], observations[,var_an[-c(delete)][i]], observations[,var_dormance[-c(delete)][i]],
+               observations[,var_deb_to_flo[-c(20)][i]], observations[,var_symptomes[-c(delete[-1]-1)][i]], observations[,var_deb_to_end[-c(delete)][i]])
+  # valeurs <- scale(valeurs)
+        # Créer le facteur correspondant
+  groupes <- factor(c(
+    rep("an_pheno", n),
+    rep("an", n),
+    rep("dormance", n),
+    rep("deb_to_flo", n),
+    rep("symptomes", n),
+    rep("deb_to_end", n)
+  ))
+  periodes2 <- c()
+  for(p1 in periodes){
+    periodes2 = c(periodes2, p1)
+    for(p2 in setdiff(periodes, periodes2)){
+      vals <- valeurs[groupes %in% c(p1, p2)]
+      gps <- groupes[groupes %in% c(p1, p2)]
+      p_value_aov = c(p_value_aov, t.test(vals~gps)$p.value)
+      p_value_bart = c(p_value_bart, bartlett.test(vals ~ gps)$p.value)
+      ct = cor.test(vals[gps == p1], vals[gps == p2], method = "spearman")
+      fc = c(fc, 2^(mean(vals[gps == p1]) - mean(vals[gps == p2])))
+      p_value_correlation = c(p_value_correlation, ct$p.value)
+      corr = c(corr, ct$estimate)
+      var = c(var, var_an_pheno[-c(delete)][i])
+      per1 <- c(per1, p1)
+      per2 <- c(per2, p2)
+    }
+  }
+}
+res_diff_pairwise = data.frame(var1 = var, periode_1 = per1, periode_2 = per2,  p_value_anova = p_value_aov, p_value_anova_ajustée = p.adjust(p_value_aov, method = "BH", n = length(p_value_aov)), p_value_bartlett = p_value_bart, p_value_bartlett_ajustée = p.adjust(p_value_bart, method = "BH", n = length(p_value_bart)),
+                               fold_change = fc, 
+                               correlation = corr, p_value_correlation = p_value_correlation, p_value_correlation_ajustée = p.adjust(p_value_correlation, method = "BH", n = length(p_value_correlation)))
+
+```
+
+
+```{r}
+# Ajouter qualitativement si il y a des différences, pour colorer le graphique :
+res_diff_pairwise$diff <- "Non"
+res_diff_pairwise$diff[res_diff_pairwise$fold_change > 1 & res_diff_pairwise$p_value_anova_ajustée < 0.05 & res_diff_pairwise$p_value_bartlett_ajustée < 0.05] <- "Positive"
+res_diff_pairwise$diff[res_diff_pairwise$fold_change < 1 & res_diff_pairwise$p_value_anova_ajustée < 0.05 & res_diff_pairwise$p_value_bartlett_ajustée < 0.05] <- "Négative"
+
+mycolors <- c("blue", "red", "black")
+names(mycolors) <- c("Négative", "Positive", "Non")
+
+plot <- res_diff_pairwise %>% 
+  ggplot(aes(x = (res_diff_pairwise$p_value_bartlett_ajustée), y = (res_diff_pairwise$p_value_anova_ajustée), color = diff, text = paste("Var:", var, "<br>Per1:", per1, "<br>Per2:", per2, "<br>Diff_moyennes:", log2(fold_change)))) + 
+  geom_point() +
+  geom_hline(yintercept=(0.05), col="grey") + 
+  geom_vline(xintercept=(0.05), col="grey") + 
+  scale_colour_manual(values = mycolors) + 
+  labs(title = "Volcano plot", x = "p-valeur du test de bartlett (homogénéité des variances) ", y = "p-valeur du t.test (égalité des moyennes")
+
+# plot
+plotly_plot <- ggplotly(plot, tooltip = "text")
+plotly_plot
+```
+
+
+
+```{r}
+# On ne rejette pas l'égalité des périodes
+print("Variables où l'on rejette aucune hypothèse nulle : ")
+res_diff_pairwise[res_diff_pairwise$p_value_anova_ajustée > 0.05 & res_diff_pairwise$p_value_bartlett_ajustée > 0.05,]
+table(res_diff_pairwise[res_diff_pairwise$p_value_anova_ajustée > 0.05 & res_diff_pairwise$p_value_bartlett_ajustée > 0.05,][,c("periode_1", "periode_2")])
+```
+
+```{r}
+print("Nombre de corrélation inter périodes > 0.7 : ")
+table(res_diff_pairwise[res_diff_pairwise$p_value_correlation_ajustée < 0.05 & abs(res_diff_pairwise$correlation) > 0.7,][,c("periode_1", "periode_2")])
+res_diff_pairwise[!(res_diff_pairwise$periode_1 %in% c("an_pheno", "an")) & !(res_diff_pairwise$periode_2 %in% c("an_pheno", "an")) & res_diff_pairwise$p_value_correlation_ajustée < 0.05 & abs(res_diff_pairwise$correlation) > 0.7,]
+```
+
+Les années phénologiques et calendaires se différencient juste sur la période de septembre à décembre.
+
+Ici, au seuil 5%, on ne rejette ni l'égalité des moyennes ni l'homogénéité des variances entre les deux périodes pour 17 des 29 variables.
+
+Les autres périodes se différencient par l'échelle ou la moyenne de leurs valeurs mais sont quand même assez corrélées.
+Surtout les années phénologiques qui semblent corrélées à toutes les périodes sauf peut être la période du débourrement à la floraison.
+
+**Comparaison par cépage ?**
+**Comparaison par région viticole ?**
+
