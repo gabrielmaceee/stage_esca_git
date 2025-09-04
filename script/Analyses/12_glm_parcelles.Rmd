@@ -1,0 +1,880 @@
+---
+title: "test"
+author: "Gabriel Macé"
+date: "2025-06-25"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+Le but de ce script écrit en R est d'essayer de comprendre pourquoi l'ajout de l'effet aléatoire sur chaque parcelle améliorant énormément les modélisations, et trouver un compromis entre prise en compte de cet effet et performance.
+
+```{r}
+library(lme4)
+library(dplyr)
+library(ggplot2)
+library(Metrics) # RMSE
+library(openxlsx)
+library(caret) # cv et findCorrelation
+
+load("../../data/modelisation/observations_parcelles.RData")
+```
+
+```{r}
+# récupération des variables par type de période :
+var_an_pheno <- colnames(observations)[13:48] # ne pas garder la longueur de la période = 365 ou 366
+var_an <- colnames(observations)[50:85] # ne pas garder la longueur de la période
+var_dormance <- colnames(observations)[86:122]
+var_deb_to_flo <- setdiff(colnames(observations)[123:159] , c("sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes <- setdiff(colnames(observations)[160:196], "sum.frost.days.0.symptomes") # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end <- colnames(observations)[197:233]
+var_tt <- c("age_parcelle_estime", "RU", "debourrement", "floraison", var_an_pheno, var_an, var_dormance, var_deb_to_flo, var_symptomes, var_deb_to_end)
+```
+
+```{r}
+observations$cepage <- as.factor(observations$cepage) # Transformation des cépages en catégorielle
+observations$region_viticole <- as.factor(observations$region_viticole) # Transformation des régions en catégorielle
+observations$identifiant_parcelle_analyse <- as.factor(observations$identifiant_parcelle_analyse)
+
+# observations$age_10_20 <- 0
+# observations$age_10_20[observations$age_parcelle_estime <= 20] <- 1
+# 
+# observations$age_20_30 <- 0
+# observations$age_20_30[observations$age_parcelle_estime > 20] <- 1
+
+observations$age_10_15 <- 0
+observations$age_10_15[observations$age_parcelle_estime <= 15] <- 1
+
+observations$age_15_25 <- 0
+observations$age_15_25[observations$age_parcelle_estime > 15 & observations$age_parcelle_estime <= 25] <- 1
+
+observations$age_25_30 <- 0
+observations$age_25_30[observations$age_parcelle_estime > 25] <- 1
+
+
+observations$ftsw_sympt_inf_0_4 <- 0
+observations$ftsw_sympt_inf_0_4[observations$ftsw.symptomes <= 0.4] <- 1
+
+observations$ftsw_sympt_sup_0_4 <- 0
+observations$ftsw_sympt_sup_0_4[observations$ftsw.symptomes > 0.4] <- 1
+
+observations$et0_sympt_inf_4 <- 0
+observations$et0_sympt_inf_4[observations$et0.symptomes <= 4] <- 1
+
+observations$et0_sympt_sup_4 <- 0
+observations$et0_sympt_sup_4[observations$et0.symptomes > 4] <- 1
+```
+
+```{r}
+# On définit la proportion de données qu'on veut dans le jeu d'entraînement
+train_ratio <- 0.8
+
+# Fonction de split stratifié
+library(dplyr)
+
+train_indices <- observations %>%
+  group_by(identifiant_parcelle_analyse) %>%
+  group_split() %>%
+  lapply(function(group) {
+    n <- nrow(group)
+    sample(seq_len(n), size = floor(train_ratio * n))
+  })
+
+# Construction du jeu d'entraînement et de test
+# Associer les indices à chaque groupe
+train <- bind_rows(
+  Map(function(group, idx) group[idx, ], group_split(observations, observations$identifiant_parcelle_analyse), train_indices)
+)
+
+test <- anti_join(observations, train, by = colnames(observations))
+```
+
+```{r}
+# On définit la proportion de données qu'on veut dans le jeu d'entraînement
+# train_ratio <- 0.8
+# obs_sort <- observations %>% arrange(annee)
+# train_indices <- obs_sort %>%
+#   group_by(identifiant_parcelle_analyse)  %>%
+#   group_split() %>%
+#   lapply(function(group) {
+#     n <- nrow(group)
+#     if(n <= 5) seq_len(ceiling(n/2)) # ceiling : arrondi au supérieur, floor : arrondi à l'inférieur
+#     else seq_len(floor(n*train_ratio)) 
+#   })# à vérif
+# 
+# # Construction du jeu d'entraînement et de test
+# # Associer les indices à chaque groupe
+# train <- bind_rows(
+#   Map(function(group, idx) group[idx, ], group_split(obs_sort, obs_sort$identifiant_parcelle_analyse), train_indices)
+# )
+# 
+# test <- anti_join(obs_sort, train, by = colnames(obs_sort))
+```
+
+```{r}
+to_use <- c("et0.symptomes", "ftsw.dormance", "auc_isv.symptomes", "sum.days.isv.mod_sev.an", "tv.deb_end", "swi.deb_flo", "tv.deb_end", "swi.deb_flo", "sum.heat.days.30.dormance", "rr.dormance", "RU") # , "RU"
+```
+
+```{r}
+fixed_effects <- paste(to_use, collapse = " + ")
+# fixed_effects <- paste0(fixed_effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30 + ftsw.symptomes:ftsw_sympt_sup_0_4 + ftsw_sympt_sup_0_4 + ftsw.symptomes:ftsw_sympt_inf_0_4 + ftsw_sympt_inf_0_4 + et0.symptomes:et0_sympt_inf_4 + et0_sympt_inf_4 +  et0.symptomes:et0_sympt_sup_4 + et0_sympt_sup_4") 
+
+fixed_effects <- paste0(fixed_effects, " + age_10_15 + age_parcelle_estime:age_10_15 + age_15_25 + age_parcelle_estime:age_15_25 + age_25_30 + age_parcelle_estime:age_25_30 + ftsw.symptomes:ftsw_sympt_sup_0_4 + ftsw_sympt_sup_0_4 + ftsw.symptomes:ftsw_sympt_inf_0_4 + ftsw_sympt_inf_0_4 + et0.symptomes:et0_sympt_inf_4 + et0_sympt_inf_4 +  et0.symptomes:et0_sympt_sup_4 + et0_sympt_sup_4") 
+
+fixed_effects <- paste0("(", fixed_effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|identifiant_parcelle_analyse) + (1|region_viticole)")) # tester avec + (1|cepage) = nul
+
+model_lm <- glmer(form, data = train[ ,-c(1, 2)]) 
+
+print("RMSE train :")
+rmse(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue train :")
+mean(abs(train$pourcentage_esca - predict(model_lm, train[ ,-c(1, 2, 5)])))
+print("R² train :")
+cor(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))^2
+
+print("RMSE test :")
+rmse(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue test :")
+mean(abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])))
+print("R² test :")
+cor(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))^2
+
+plot(test$pourcentage_esca, abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue",
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]),
+     xlab = "Incidence d'esca", ylab = "Prédiction",
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+lines(0:20, 0:20, col="red")
+```
+
+```{r}
+fixed_effects <- paste(colnames(observations[,-c(1:8)]), collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|identifiant_parcelle_analyse) + (1|cepage) + (1|region_viticole) + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30"))
+# + (1|annee) n'améliore pas le modèle
+
+model_lm <- glmer(form, data = train[ ,-c(1, 2)]) 
+
+print("RMSE train :")
+rmse(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue train :")
+mean(abs(train$pourcentage_esca - predict(model_lm, train[ ,-c(1, 2, 5)])))
+print("R² train :")
+cor(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))^2
+
+print("RMSE test :")
+rmse(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue test :")
+mean(abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])))
+print("R² test :")
+cor(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))^2
+
+plot(test$pourcentage_esca, abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue",
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]),
+     xlab = "Incidence d'esca", ylab = "Prédiction",
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+lines(0:20, 0:20, col="red")
+```
+
+```{r}
+fixed_effects <- paste(colnames(observations[,-c(1:8)]), collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|identifiant_parcelle_analyse) + (1|cepage) + (1|region_viticole) + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30"))
+model_lm <- glmer(form, data = observations) 
+
+print("RMSE train :")
+rmse(observations$pourcentage_esca, predict(model_lm, observations[ ,-c(5)]))
+print("Erreur moyenne absolue train :")
+mean(abs(observations$pourcentage_esca - predict(model_lm, observations[ ,-c(5)])))
+print("R² train :")
+cor(observations$pourcentage_esca, predict(model_lm, observations[ ,-c(5)]))^2
+```
+
+
+```{r}
+fixed_effects <- paste(colnames(observations[,-c(1:8)]), collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|identifiant_parcelle_analyse) + (1|cepage) + (1|region_viticole) + + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30 + ftsw.symptomes:ftsw_sympt_sup_0_4 + ftsw_sympt_sup_0_4 + ftsw.symptomes:ftsw_sympt_inf_0_4 + ftsw_sympt_inf_0_4 + et0.symptomes:et0_sympt_inf_4 + et0_sympt_inf_4 +  et0.symptomes:et0_sympt_sup_4 + et0_sympt_sup_4"))
+# ftsw.symptomes:ftsw_sympt_sup_0_4 + ftsw_sympt_sup_0_4 + ftsw.symptomes:ftsw_sympt_inf_0_4 + ftsw_sympt_inf_0_4 + et0.symptomes:et0_sympt_inf_4 + et0_sympt_inf_4 +  et0.symptomes:et0_sympt_sup_4 + et0_sympt_sup_4 
+# n'améliore pas vraiment le modèle
+
+model_lm <- glmer(form, data = train[ ,-c(1, 2)]) 
+
+print("RMSE train :")
+rmse(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue train :")
+mean(abs(train$pourcentage_esca - predict(model_lm, train[ ,-c(1, 2, 5)])))
+print("R² train :")
+cor(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))^2
+
+print("RMSE test :")
+rmse(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue test :")
+mean(abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])))
+print("R² test :")
+cor(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))^2
+
+plot(test$pourcentage_esca, abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue",
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]),
+     xlab = "Incidence d'esca", ylab = "Prédiction",
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+lines(0:20, 0:20, col="red")
+```
+
+
+```{r}
+sd_parcelle <- observations %>% group_by(identifiant_parcelle_analyse) %>% summarise(sd = sd(pourcentage_esca))
+```
+
+```{r}
+hist(sd_parcelle$sd)
+```
+
+```{r}
+diff_max <- observations %>% group_by(identifiant_parcelle_analyse) %>% summarise(diff_max = max(pourcentage_esca) - min(pourcentage_esca))
+```
+
+```{r}
+hist(diff_max$diff_max, breaks = 100)
+```
+
+```{r}
+
+```
+
+## Modèles auto-régressif :
+
+
+```{r}
+library(dplyr)
+
+autocorrs <- observations |>
+  group_by(identifiant_parcelle_analyse) |>
+  arrange(annee) |>
+  summarise(
+    acf1 = cor(pourcentage_esca, lag(pourcentage_esca), use = "complete.obs")
+  )
+
+mean(abs(autocorrs$acf1), na.rm = TRUE)  # moyenne de l'autocorrélation à lag 1
+
+```
+
+```{r}
+library(purrr)
+
+acf_lag1s <- observations |>
+  group_by(identifiant_parcelle_analyse) |>
+  arrange(annee) |>
+  summarise(
+    acf1 = {
+      acf_vals <- acf(pourcentage_esca, lag.max = 1, plot = FALSE, na.action = na.pass)
+      acf_vals$acf[2]  # lag 1
+    }
+  )
+
+mean(abs(acf_lag1s$acf1), na.rm = TRUE)
+table(abs(acf_lag1s$acf1)>0.2)
+``` 
+
+```{r}
+obs <- observations %>%
+  group_by(identifiant_parcelle_analyse) %>%
+  arrange(annee) %>%
+  mutate(esca_n_1 = lag(pourcentage_esca))
+
+obs <- obs[!is.na(obs$esca_n_1),]
+```
+
+```{r}
+i_train = sample(1:dim(obs)[1], replace = FALSE, size = 3500)
+fixed_effects <- paste(colnames(obs[,-c(1:8)]), collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|cepage) + (1|region_viticole) + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30"))
+# + (1|annee) n'améliore pas le modèle
+# + (1|identifiant_parcelle_analyse)
+model_lm <- glmer(form, data = obs[i_train,]) 
+
+print("RMSE train :")
+rmse(obs$pourcentage_esca[i_train], predict(model_lm, obs[i_train ,-c(5)]))
+print("Erreur moyenne absolue train :")
+mean(abs(obs$pourcentage_esca[i_train] - predict(model_lm, obs[i_train ,-c(5)])))
+print("R² train :")
+cor(obs$pourcentage_esca[i_train], predict(model_lm, obs[i_train ,-c(5)]))^2
+
+print("RMSE test :")
+rmse(obs$pourcentage_esca[-i_train], predict(model_lm, obs[-i_train ,-c(5)]))
+print("Erreur moyenne absolue test :")
+mean(abs(obs$pourcentage_esca[-i_train] - predict(model_lm, obs[-i_train ,-c(5)])))
+print("R² test :")
+cor(obs$pourcentage_esca[-i_train], predict(model_lm, obs[-i_train ,-c(5)]))^2
+```
+
+```{r}
+# On définit la proportion de données qu'on veut dans le jeu d'entraînement
+train_ratio <- 0.8
+
+# Fonction de split stratifié
+library(dplyr)
+
+train_indices <- obs %>%
+  group_by(identifiant_parcelle_analyse) %>%
+  group_split() %>%
+  lapply(function(group) {
+    n <- nrow(group)
+    sample(seq_len(n), size = floor(train_ratio * n))
+  })
+
+# Construction du jeu d'entraînement et de test
+# Associer les indices à chaque groupe
+train <- bind_rows(
+  Map(function(group, idx) group[idx, ], group_split(obs, obs$identifiant_parcelle_analyse), train_indices)
+)
+
+test <- anti_join(obs, train, by = colnames(obs))
+```
+
+```{r}
+fixed_effects <- paste(colnames(obs[,-c(1:8)]), collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|cepage) + (1|region_viticole) + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30 + (1|identifiant_parcelle_analyse)"))
+
+model_lm <- glmer(form, data = train[ ,-c(1, 2)]) 
+
+print("RMSE train :")
+rmse(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue train :")
+mean(abs(train$pourcentage_esca - predict(model_lm, train[ ,-c(1, 2, 5)])))
+print("R² train :")
+cor(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))^2
+
+print("RMSE test :")
+rmse(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue test :")
+mean(abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])))
+print("R² test :")
+cor(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))^2
+
+plot(test$pourcentage_esca, abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue",
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]),
+     xlab = "Incidence d'esca", ylab = "Prédiction",
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+lines(0:40, 0:40, col="red")
+```
+
+
+```{r}
+
+```
+
+```{r}
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+corr_matrix <- cor(observations[ ,var_tt])
+# high_corr <- findCorrelation(corr_matrix, cutoff = 0.8, names = TRUE)
+
+
+score_var <- read.xlsx("../../data/resultats/r2_rmse_par_variable.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars <- var_tt
+to_rm <- c()
+for(var1 in vars){
+  if(!var1 %in% to_rm){
+    for(var2 in setdiff(vars, c(var1, to_rm))){
+      if(cor(obs[,var1], obs[,var2]) > 0.8){
+        if(score_var[score_var$variable == var1, "rmse"] > score_var[score_var$variable == var1, "rmse"]){
+          to_rm <- c(to_rm, var1)
+          break
+        }
+        to_rm <- c(to_rm, var2)
+      }
+    }
+  }
+}
+
+to_keep <- c("cepage", setdiff(vars, to_rm), "esca_n_1")
+to_keep
+```
+
+```{r}
+library(xgboost)
+i_train = sample(1:dim(obs)[1], replace = FALSE, size = 3500)
+
+features <- obs[ ,to_keep]
+features <- Matrix::sparse.model.matrix(~ cepage + . - 1, data = features, sep = "_") #  + region_viticole
+
+
+model_xgb = xgboost(data = as.matrix(features[i_train,]), nround = 200, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= obs[i_train,]$pourcentage_esca,
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+plot(model_xgb$evaluation_log$train_poisson_nloglik, type = "l")
+
+print("RMSE train :")
+rmse(obs$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train, ])))
+print("Erreur moyenne absolue train :")
+mean(abs(obs$pourcentage_esca[i_train] - predict(model_xgb, as.matrix(features[i_train,]))))
+print("R² train :")
+cor(obs$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train,])))^2
+
+
+print("RMSE test :")
+rmse(obs$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))
+print("Erreur moyenne absolue test :")
+mean(abs(obs$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))))
+print("R² test :")
+cor(obs$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))^2
+
+plot(obs$pourcentage_esca[-i_train], abs(obs$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue",
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(obs$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])),
+     xlab = "Incidence d'esca", ylab = "Prédiction",
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+lines(0:40, 0:40, col="red")
+```
+
+```{r}
+
+```
+
+
+
+```{r}
+# to_use <- c("et0.symptomes", "ftsw.dormance", "auc_isv.symptomes", "sum.days.isv.mod_sev.an", "tv.deb_end", "swi.deb_flo", "tv.deb_end", "swi.deb_flo", "sum.heat.days.30.dormance", "rr.dormance", "RU") # , "RU"
+# fixed_effects <- paste(to_use, collapse = " + ")
+# fixed_effects <- paste0(fixed_effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30 + ftsw.symptomes:ftsw_sympt_sup_0_4 + ftsw_sympt_sup_0_4 + ftsw.symptomes:ftsw_sympt_inf_0_4 + ftsw_sympt_inf_0_4 + et0.symptomes:et0_sympt_inf_4 + et0_sympt_inf_4 +  et0.symptomes:et0_sympt_sup_4 + et0_sympt_sup_4") 
+# fixed_effects <- paste0("(", fixed_effects, "|cepage)")
+# form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|identifiant_parcelle_analyse) + (1|region_viticole)"))
+```
+
+```{r}
+to_use <- c(setdiff(vars, to_rm), "esca_n_1")
+fixed_effects <- paste(to_use, collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|cepage) + (1|region_viticole) + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")) #  + (1|identifiant_parcelle_analyse)
+```
+
+```{r}
+library(brms)
+model_brm <- brm(
+  form,
+  data = obs,
+  family = gaussian(),  # ou autre selon le cas
+  autocor = cor_ar(~ annee | identifiant_parcelle_analyse, p = 1)
+)
+```
+
+
+
+```{r}
+pred <- predict(model_brm, obs[ ,-c(2, 5)])[,1]
+print("RMSE :")
+rmse(obs$pourcentage_esca, pred)
+print("Erreur moyenne absolue :")
+mean(abs(obs$pourcentage_esca - pred))
+print("R² :")
+cor(obs$pourcentage_esca, pred)^2
+```
+
+```{r}
+
+```
+
+```{r}
+to_use <- c(setdiff(vars, to_rm), "esca_n_1")
+fixed_effects <- paste(to_use, collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|cepage) + (1|region_viticole) + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30 + (1|identifiant_parcelle_analyse)")) 
+```
+
+```{r}
+model_brm_parcelle <- brm(
+  form,
+  data = obs,
+  family = gaussian(),  # ou autre selon le cas
+  autocor = cor_ar(~ annee | identifiant_parcelle_analyse, p = 1)
+)
+```
+
+```{r}
+predict <- predict(model_brm_parcelle, obs[ ,-c(2, 5)])
+pred <- predict[,1]
+print("RMSE :")
+rmse(obs$pourcentage_esca, pred)
+print("Erreur moyenne absolue :")
+mean(abs(obs$pourcentage_esca - pred))
+print("R² :")
+cor(obs$pourcentage_esca, pred)^2
+
+count <- 0
+for(i in 1:length(obs$pourcentage_esca)){
+  if(obs$pourcentage_esca[i] > predict[i,3] & obs$pourcentage_esca[i] < predict[i,4]) count = count + 1
+}
+print(paste("% de prédiction dans l'intervalle :", count/length(obs$pourcentage_esca)))  
+```
+
+```{r}
+
+```
+
+```{r}
+# On définit la proportion de données qu'on veut dans le jeu d'entraînement
+train_ratio <- 0.8
+
+train_indices <- observations %>%
+  group_by(identifiant_parcelle_analyse) %>%
+  group_split() %>%
+  lapply(function(group) {
+    n <- nrow(group)
+    sample(seq_len(n), size = floor(train_ratio * n))
+  })
+
+# Construction du jeu d'entraînement et de test
+# Associer les indices à chaque groupe
+train <- bind_rows(
+  Map(function(group, idx) group[idx, ], group_split(observations, observations$identifiant_parcelle_analyse), train_indices)
+)
+
+test <- anti_join(observations, train, by = colnames(observations))
+```
+
+```{r}
+to_use <- setdiff(vars, to_rm)
+fixed_effects <- paste(to_use, collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|cepage) + (1|region_viticole) + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30 + (1|identifiant_parcelle_analyse)")) 
+# + arma(p = 1, q = 1)
+```
+
+```{r}
+model_brm_parcelle_train <- brm(
+  form,
+  data = train,
+  family = gaussian(),  # ou autre selon le cas
+  autocor = cor_ar(~ annee | identifiant_parcelle_analyse, p = 1)
+)
+```
+
+```{r}
+predict <- predict(model_brm_parcelle_train, test[ ,-c(2, 5)])
+pred <- predict[,1]
+print("RMSE test :")
+rmse(test$pourcentage_esca, pred)
+print("Erreur moyenne absolue test :")
+mean(abs(test$pourcentage_esca - pred))
+print("R² test :")
+cor(test$pourcentage_esca, pred)^2
+
+count <- 0
+for(i in 1:length(test$pourcentage_esca)){
+  if(test$pourcentage_esca[i] > predict[i,3] & test$pourcentage_esca[i] < predict[i,4]) count = count + 1
+}
+print(paste("Test : % de prédiction dans l'intervalle :", count/length(test$pourcentage_esca))) 
+```
+
+
+```{r}
+predict <- predict(model_brm_parcelle_train, train[ ,-c(2, 5)])
+pred <- predict[,1]
+print("RMSE train :")
+rmse(train$pourcentage_esca, pred)
+print("Erreur moyenne absolue train :")
+mean(abs(train$pourcentage_esca - pred))
+print("R² train :")
+cor(train$pourcentage_esca, pred)^2
+
+count <- 0
+for(i in 1:length(train$pourcentage_esca)){
+  if(train$pourcentage_esca[i] > predict[i,3] & train$pourcentage_esca[i] < predict[i,4]) count = count + 1
+}
+print(paste("Train : % de prédiction dans l'intervalle :", count/length(train$pourcentage_esca))) 
+```
+
+```{r}
+
+```
+
+
+```{r}
+# On définit la proportion de données qu'on veut dans le jeu d'entraînement
+train_ratio <- 0.8
+obs_sort <- observations %>% arrange(annee)
+train_indices <- obs_sort %>%
+  group_by(identifiant_parcelle_analyse)  %>%
+  group_split() %>%
+  lapply(function(group) {
+    n <- nrow(group)
+    if(n <= 5) seq_len(ceiling(n/2)) # ceiling : arrondi au supérieur, floor : arrondi à l'inférieur
+    else seq_len(floor(n*train_ratio)) 
+  })# à vérif
+
+# Construction du jeu d'entraînement et de test
+# Associer les indices à chaque groupe
+train <- bind_rows(
+  Map(function(group, idx) group[idx, ], group_split(obs_sort, obs_sort$identifiant_parcelle_analyse), train_indices)
+)
+
+test <- anti_join(obs_sort, train, by = colnames(obs_sort))
+```
+
+```{r}
+to_use <- setdiff(vars, to_rm)
+fixed_effects <- paste(to_use, collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|cepage) + (1|region_viticole) + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30 + (1|identifiant_parcelle_analyse)")) 
+# + arma(p = 1, q = 1)
+```
+
+```{r}
+model_brm_parcelle_train <- brm(
+  form,
+  data = train,
+  family = gaussian(),  # ou autre selon le cas
+  autocor = cor_ar(~ annee | identifiant_parcelle_analyse, p = 1)
+)
+```
+
+```{r}
+predict <- predict(model_brm_parcelle_train, train[ ,-c(2, 5)])
+pred <- predict[,1]
+print("RMSE train :")
+rmse(train$pourcentage_esca, pred)
+print("Erreur moyenne absolue train :")
+mean(abs(train$pourcentage_esca - pred))
+print("R² train :")
+cor(train$pourcentage_esca, pred)^2
+
+count <- 0
+for(i in 1:length(train$pourcentage_esca)){
+  if(train$pourcentage_esca[i] > predict[i,3] & train$pourcentage_esca[i] < predict[i,4]) count = count + 1
+}
+print(paste("Train : % de prédiction dans l'intervalle :", count/length(train$pourcentage_esca))) 
+```
+
+```{r}
+predict <- predict(model_brm_parcelle_train, test[ ,-c(2, 5)])
+pred <- predict[,1]
+print("RMSE test :")
+rmse(test$pourcentage_esca, pred)
+print("Erreur moyenne absolue test :")
+mean(abs(test$pourcentage_esca - pred))
+print("R² test :")
+cor(test$pourcentage_esca, pred)^2
+
+count <- 0
+for(i in 1:length(test$pourcentage_esca)){
+  if(test$pourcentage_esca[i] > predict[i,3] & test$pourcentage_esca[i] < predict[i,4]) count = count + 1
+}
+print(paste("Test : % de prédiction dans l'intervalle :", count/length(test$pourcentage_esca))) 
+```
+
+
+
+## Classe de sensibilité des parcelles :
+
+
+```{r}
+moy_parcelle <- observations %>% group_by(identifiant_parcelle_analyse) %>% summarise(moy = mean(pourcentage_esca))
+hist(moy_parcelle$moy)
+```
+
+```{r}
+# On définit la proportion de données qu'on veut dans le jeu d'entraînement
+train_ratio <- 0.8
+obs_sort <- observations %>% arrange(annee)
+train_indices <- obs_sort %>%
+  group_by(identifiant_parcelle_analyse) %>%
+  group_split() %>%
+  lapply(function(group) {
+    n <- nrow(group)
+    if(n <= 5) seq_len(ceiling(n/2)) # ceiling : arrondi au supérieur, floor : arrondi à l'inférieur
+    else seq_len(floor(n*train_ratio)) 
+  })# à vérif
+
+# Construction du jeu d'entraînement et de test
+# Associer les indices à chaque groupe
+train <- bind_rows(
+  Map(function(group, idx) group[idx, ], group_split(obs_sort, obs_sort$identifiant_parcelle_analyse), train_indices)
+)
+
+test <- anti_join(obs_sort, train, by = colnames(obs_sort))
+
+
+moy_parcelle <- train %>% group_by(identifiant_parcelle_analyse) %>% summarise(moy_parcelle = mean(pourcentage_esca))
+train <- train %>% left_join(moy_parcelle, by = "identifiant_parcelle_analyse")
+train$moy_parcelle <- as.factor(round(train$moy_parcelle, 0))
+test <- test %>% left_join(moy_parcelle, by = "identifiant_parcelle_analyse")
+test$moy_parcelle <- as.factor(round(test$moy_parcelle, 0))
+```
+
+```{r}
+to_use <- c("et0.symptomes", "ftsw.dormance", "auc_isv.symptomes", "sum.days.isv.mod_sev.an", "tv.deb_end", "swi.deb_flo", "tv.deb_end", "swi.deb_flo", "sum.heat.days.30.dormance", "rr.dormance", "RU") # , "RU"
+```
+
+```{r}
+fixed_effects <- paste(to_use, collapse = " + ")
+fixed_effects <- paste0(fixed_effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30 + ftsw.symptomes:ftsw_sympt_sup_0_4 + ftsw_sympt_sup_0_4 + ftsw.symptomes:ftsw_sympt_inf_0_4 + ftsw_sympt_inf_0_4 + et0.symptomes:et0_sympt_inf_4 + et0_sympt_inf_4 +  et0.symptomes:et0_sympt_sup_4 + et0_sympt_sup_4") 
+fixed_effects <- paste0("(", fixed_effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|moy_parcelle) + (1|region_viticole)")) #tester avec + (1|cepage)
+
+model_lm <- glmer(form, data = train[ ,-c(1, 2)]) 
+
+print("RMSE train :")
+rmse(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue train :")
+mean(abs(train$pourcentage_esca - predict(model_lm, train[ ,-c(1, 2, 5)])))
+print("R² train :")
+cor(train$pourcentage_esca, predict(model_lm, train[ ,-c(1, 2, 5)]))^2
+
+print("RMSE test :")
+rmse(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))
+print("Erreur moyenne absolue test :")
+mean(abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])))
+print("R² test :")
+cor(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]))^2
+
+plot(test$pourcentage_esca, abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue",
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]),
+     xlab = "Incidence d'esca", ylab = "Prédiction",
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+lines(0:20, 0:20, col="red")
+```
+
+```{r}
+# On définit la proportion de données qu'on veut dans le jeu d'entraînement
+train_ratio <- 0.8
+
+train_indices <- observations %>%
+  group_by(identifiant_parcelle_analyse) %>%
+  group_split() %>%
+  lapply(function(group) {
+    n <- nrow(group)
+    sample(seq_len(n), size = floor(train_ratio * n))
+  })
+
+# Construction du jeu d'entraînement et de test
+# Associer les indices à chaque groupe
+train <- bind_rows(
+  Map(function(group, idx) group[idx, ], group_split(observations, observations$identifiant_parcelle_analyse), train_indices)
+)
+
+test <- anti_join(observations, train, by = colnames(observations))
+
+moy_parcelle <- train %>% group_by(identifiant_parcelle_analyse) %>% summarise(moy_parcelle = median(pourcentage_esca))
+train <- train %>% left_join(moy_parcelle, by = "identifiant_parcelle_analyse")
+train$moy_parcelle <- as.factor(round(train$moy_parcelle, 1)) # arrondi à l'unité
+# train$moy_parcelle <- as.factor(round(train$moy_parcelle *2)/2) # arrondi au dixième
+# train$moy_parcelle <- as.factor(round(train$moy_parcelle, 1)) # arrondi à 0.5
+test <- test %>% left_join(moy_parcelle, by = "identifiant_parcelle_analyse")
+test$moy_parcelle <- as.factor(round(test$moy_parcelle, 1)) # arrondi à l'unité
+# test$moy_parcelle <- as.factor(round(test$moy_parcelle, 1)) # arrondi au dixième
+# test$moy_parcelle <- as.factor(round(test$moy_parcelle *2)/2) # arrondi à 0.5
+```
+
+
+```{r}
+to_use <- c("et0.symptomes", "ftsw.dormance", "auc_isv.symptomes", "sum.days.isv.mod_sev.an", "tv.deb_end", "swi.deb_flo", "tv.deb_end", "swi.deb_flo", "sum.heat.days.30.dormance", "rr.dormance", "RU")
+```
+
+```{r}
+fixed_effects <- paste(to_use, collapse = " + ")
+fixed_effects <- paste0(fixed_effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30 + ftsw.symptomes:ftsw_sympt_sup_0_4 + ftsw_sympt_sup_0_4 + ftsw.symptomes:ftsw_sympt_inf_0_4 + ftsw_sympt_inf_0_4 + et0.symptomes:et0_sympt_inf_4 + et0_sympt_inf_4 +  et0.symptomes:et0_sympt_sup_4 + et0_sympt_sup_4") 
+fixed_effects <- paste0("(", fixed_effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|moy_parcelle) + (1|region_viticole)")) # tester avec + (1|cepage) = nul
+
+model_lm <- glmer(form, data = train[ ,-c(1, 2)]) 
+
+pred_train <- predict(model_lm, train[ ,-c(1, 2, 5)])
+print("RMSE train :")
+rmse(train$pourcentage_esca, pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(train$pourcentage_esca - pred_train))
+print("R² train :")
+cor(train$pourcentage_esca, pred_train)^2
+
+pred_test <- predict(model_lm, test[ ,-c(1, 2, 5)])
+print("RMSE test :")
+rmse(test$pourcentage_esca, pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(test$pourcentage_esca - pred_test))
+print("R² test :")
+cor(test$pourcentage_esca, pred_test)^2
+
+plot(test$pourcentage_esca, abs(test$pourcentage_esca - predict(model_lm, test[ ,-c(1, 2, 5)])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue",
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(test$pourcentage_esca, predict(model_lm, test[ ,-c(1, 2, 5)]),
+     xlab = "Incidence d'esca", ylab = "Prédiction",
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+lines(0:20, 0:20, col="red")
+```
+
+
+```{r}
+pred_train <- predict(model_lm, train[ ,-c(1, 2, 5)])
+pred_train[pred_train < 0] <- 0
+print("RMSE train :")
+rmse(train$pourcentage_esca, pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(train$pourcentage_esca - pred_train))
+print("R² train :")
+cor(train$pourcentage_esca, pred_train)^2
+
+pred_test <- predict(model_lm, test[ ,-c(1, 2, 5)])
+pred_test[pred_test < 0] <- 0
+print("RMSE test :")
+rmse(test$pourcentage_esca, pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(test$pourcentage_esca - pred_test))
+print("R² test :")
+cor(test$pourcentage_esca, pred_test)^2
+```
+
+```{r}
+table(train$moy_parcelle)
+```
