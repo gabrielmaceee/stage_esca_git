@@ -1,0 +1,680 @@
+---
+title: "Graphiques des projections"
+author: "Gabriel Macé"
+date: "2025-08-05"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+```{r, include = FALSE}
+library(ggplot2)
+library(plotly) # Graphs intéractifs
+library(dplyr)
+library(tidyr)
+library(terra)
+library(tidyterra)
+load("../../data/Projections/Res_moy/esca_moy_historical.RData")
+load("../../data/Projections/Res_moy/esca_moy_245_2046_2065.RData")
+load("../../data/Projections/Res_moy/esca_moy_245_2081_2100.RData")
+load("../../data/Projections/Res_moy/esca_moy_585_2046_2065.RData")
+load("../../data/Projections/Res_moy/esca_moy_585_2081_2100.RData")
+load("../../data/modelisation/observations_parcelles.RData")
+```
+
+
+
+```{r}
+# Récupération contour France : 
+limites_france <- vect("../../data/geographie/france_poly_limits.shp")
+limites_france <- project(limites_france, "EPSG:2154")
+safran_grid <- project(vect("../../data/geographie/maille_safran.shp"), "EPSG:2154")
+mailles_communes <- read.csv("../../data/geographie/correspondance_maille_commune.csv", sep = ",")
+mailles_communes$X_maille <- mailles_communes$X_maille*100
+mailles_communes$Y_maille <- mailles_communes$Y_maille*100
+
+safran_grid <- safran_grid %>% left_join(mailles_communes[,c("ID_MAILLE", "region_viticole")], by = c("ID" = "ID_MAILLE"), relationship = "one-to-one", multiple = "any")
+```
+
+
+```{r}
+# Jointure avec les observations
+safran_grid <- safran_grid %>% left_join(hist_moy, by = c("ID" = "maille"), 
+                                         relationship = "one-to-many", ) %>% drop_na(moy_lm)
+```
+
+## Cartographie
+Il faut fixé une catégorie d'incidence(ici j'ai pris "[0;1[")
+
+### GLM
+
+```{r}
+to_plot <- safran_grid %>% filter(esca_categoriel == "[0;1[") |>
+  group_by(ID, cepage, region_viticole, an, age_parcelle_estime) |>
+  summarise(esca = round(mean(moy_lm, na.rm = TRUE), 2)) 
+
+col = c("darkblue", "darkcyan", "forestgreen","yellow","orange","red2")
+
+to_plot$int <- "[0;1["
+to_plot[to_plot$esca >= 1,]$int <- "[1;2[" 
+to_plot[to_plot$esca >= 2,]$int <- "[2;5["
+to_plot[to_plot$esca >= 5,]$int <- "[5;10["
+to_plot[to_plot$esca >= 10,]$int <- "[10;20["
+to_plot[to_plot$esca >= 20,]$int <- "[20;100["
+to_plot$int <- factor(to_plot$int, levels = c("[0;1[", "[1;2[", "[2;5[", "[5;10[", "[10;20[", "[20;100["))
+```
+
+
+
+```{r}
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = int, color = int, frame = an, text = paste("ID:", ID, "<br>Cépage:", cepage,  "<br>Région:", region_viticole, "<br>Incidence esca:", esca)))  +
+  facet_wrap(~ age_parcelle_estime) +
+  scale_fill_manual(values = c("[0;1[" = col[1], "[1;2[" = col[2], "[2;5[" = col[3], "[5;10[" = col[4], "[10;20[" = col[5], "[20;100[" = col[6])) +
+  scale_color_manual(values = c("[0;1[" = col[1], "[1;2[" = col[2], "[2;5[" = col[3], "[5;10[" = col[4], "[10;20[" = col[5], "[20;100[" = col[6])) +
+  labs(title = "Incidence d'esca moyenne par maille (glm)") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Incidence esca"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  layout(showlegend = TRUE) %>% 
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+
+##### Juste pour enlever les doublons dans les légendes :
+# Suppression sur le premier affichage
+legend_names <- c()
+
+for (k in seq_along(plotly_plot$x$data)) {
+  trace_name <- plotly_plot$x$data[[k]]$name
+  if (is.null(trace_name) || trace_name == "") next
+  if (trace_name %in% legend_names) {
+    plotly_plot$x$data[[k]]$showlegend <- FALSE
+  } else {
+    legend_names <- c(legend_names, trace_name)
+  }
+}
+
+# Suppression sur tous les frames de l'animation
+for (f in seq_along(plotly_plot$x$frames)) {
+  legend_names <- c()
+  for (k in seq_along(plotly_plot$x$frames[[f]]$data)) {
+    trace_name <- plotly_plot$x$frames[[f]]$data[[k]]$name
+    if (is.null(trace_name) || trace_name == "") next
+    if (trace_name %in% legend_names) {
+      plotly_plot$x$frames[[f]]$data[[k]]$showlegend <- FALSE
+    } else {
+      legend_names <- c(legend_names, trace_name)
+    }
+  }
+}
+
+
+# Afficher la carte interactive
+plotly_plot
+# htmlwidgets::saveWidget( widget = plotly_plot, file =  "../graphs/carto/projections.html")
+```
+
+### Gaussian process
+
+```{r}
+to_plot <- safran_grid %>% filter(esca_categoriel == "[0;1[") |>
+  group_by(ID, cepage, region_viticole, an, age_parcelle_estime) |>
+  summarise(esca = round(mean(moy_lm, na.rm = TRUE), 2))
+
+to_plot$int <- "[0;1["
+to_plot[to_plot$esca >= 1,]$int <- "[1;2[" 
+to_plot[to_plot$esca >= 2,]$int <- "[2;5["
+to_plot[to_plot$esca >= 5,]$int <- "[5;10["
+to_plot[to_plot$esca >= 10,]$int <- "[10;20["
+to_plot[to_plot$esca >= 20,]$int <- "[20;100["
+to_plot$int <- factor(to_plot$int, levels = c("[0;1[", "[1;2[", "[2;5[", "[5;10[", "[10;20[", "[20;100["))
+```
+
+```{r}
+plot <- to_plot %>% 
+  ggplot() +
+  geom_spatvector(aes(fill = int, color = int, frame = an, text = paste("ID:", ID, "<br>Cépage:", cepage,  "<br>Région:", region_viticole, "<br>Incidence esca:", esca)))  +
+  facet_wrap(~ age_parcelle_estime) +
+  scale_fill_manual(values = c("[0;1[" = col[1], "[1;2[" = col[2], "[2;5[" = col[3], "[5;10[" = col[4], "[10;20[" = col[5], "[20;100[" = col[6])) +
+  scale_color_manual(values = c("[0;1[" = col[1], "[1;2[" = col[2], "[2;5[" = col[3], "[5;10[" = col[4], "[10;20[" = col[5], "[20;100[" = col[6])) +
+  labs(title = "Incidence d'esca moyenne par maille (gp)") +
+  guides(color = "none", size = "none", fill = guide_colorbar(title = "Incidence esca"))
+plot <- plot +  geom_spatvector(data = limites_france, color = "black", fill = "transparent")
+
+# Convertir l'objet ggplot en plotly
+plotly_plot <- ggplotly(plot, tooltip = "text") %>%
+  layout(showlegend = TRUE) %>% 
+  animation_opts(transition=0) %>% 
+  animation_slider(currentvalue = list(prefix = "Année " , font = list(color="blue")))
+
+
+##### Juste pour enlever les doublons dans les légendes :
+# Suppression sur le premier affichage
+legend_names <- c()
+
+for (k in seq_along(plotly_plot$x$data)) {
+  trace_name <- plotly_plot$x$data[[k]]$name
+  if (is.null(trace_name) || trace_name == "") next
+  if (trace_name %in% legend_names) {
+    plotly_plot$x$data[[k]]$showlegend <- FALSE
+  } else {
+    legend_names <- c(legend_names, trace_name)
+  }
+}
+
+# Suppression sur tous les frames de l'animation
+for (f in seq_along(plotly_plot$x$frames)) {
+  legend_names <- c()
+  for (k in seq_along(plotly_plot$x$frames[[f]]$data)) {
+    trace_name <- plotly_plot$x$frames[[f]]$data[[k]]$name
+    if (is.null(trace_name) || trace_name == "") next
+    if (trace_name %in% legend_names) {
+      plotly_plot$x$frames[[f]]$data[[k]]$showlegend <- FALSE
+    } else {
+      legend_names <- c(legend_names, trace_name)
+    }
+  }
+}
+
+
+# Afficher la carte interactive
+plotly_plot
+# htmlwidgets::saveWidget( widget = plotly_plot, file =  "../graphs/carto/projections.html")
+```
+
+
+
+
+## Graphique des évolutions / région viticole
+
+```{r}
+to_plot <- safran_grid %>%
+  group_by(an) %>%
+  summarise(
+    glm = mean(moy_lm, na.rm = TRUE),
+    gaussian_p = mean(moy_gp, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+p <- ggplot(to_plot, aes(x = an, y = esca, color = modele)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Évolution de l'esca"),
+      x = "Année",
+      y = "Incidence moyenne",
+      color = "Modèle"
+    ) +
+    theme_minimal()
+  
+print(p)
+```
+
+### Moyenne annuelle sur toutes les mailles de la région
+
+```{r}
+to_plot <- safran_grid %>% filter(esca_categoriel == "[0;1[", age_parcelle_estime == 10) |>
+  group_by(cepage, region_viticole, an) |>
+  summarise(esca = mean(moy_lm, na.rm = TRUE), .groups = "drop")
+
+# Liste unique des régions
+regions <- unique(to_plot$region_viticole)
+
+# Boucle par région
+for (region_i in regions) {
+  
+  df_i <- to_plot %>%
+    filter(region_viticole == region_i)
+  
+  p <- ggplot(df_i, aes(x = an, y = esca, color = cepage)) +
+    geom_line(linewidth = 1) +
+    geom_point() +
+    labs(
+      title = paste("Évolution de l'esca -", region_i),
+      x = "Année",
+      y = "Incidence moyenne (glm)",
+      color = "Cépage"
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "bottom"
+    )
+  
+  print(p)
+}
+
+```
+
+On peut faire pareil avec les processus gaussiens
+
+
+### Par catégorie d'incidence
+Exemple avec âge fixé à 10 ans
+
+```{r}
+to_plot <- safran_grid %>%
+  filter(age_parcelle_estime == 10) %>%
+  group_by(cepage, region_viticole, an, esca_categoriel) %>%
+  summarise(
+    glm = mean(moy_lm, na.rm = TRUE),
+    gaussian_p = mean(moy_gp, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca"
+  )
+
+# Récupérer toutes les combinaisons uniques
+combos <- unique(to_plot[, c("region_viticole", "cepage")])
+
+# Boucle d'affichage
+for (i in seq_len(nrow(combos))) {
+  region_i <- combos$region_viticole[i]
+  cepage_i <- combos$cepage[i]
+  
+  df_i <- to_plot %>%
+    filter(region_viticole == region_i, cepage == cepage_i)
+  
+  p <- ggplot(df_i, aes(x = an, y = esca, color = esca_categoriel, linetype = modele)) +
+    geom_line(linewidth = 1) +
+    scale_linetype_manual(values = c("glm" = "solid", "gaussian_p" = "dashed")) +
+    labs(
+      title = paste("Évolution de l'esca -", region_i, "/", cepage_i),
+      x = "Année",
+      y = "Incidence moyenne",
+      color = "Catégorie d'incidence",
+      linetype = "Modèle"
+    ) +
+    theme_minimal()
+  
+  print(p)
+}
+
+```
+
+### Par catégorie d'âge
+Exemple avec catégorie d'indicence fixé à [20;100[ (plus que 20)
+
+```{r}
+to_plot <- safran_grid %>%
+  filter(esca_categoriel == "[20;100[") %>%
+  group_by(cepage, region_viticole, an, age_parcelle_estime) %>%
+  summarise(
+    glm = mean(moy_lm, na.rm = TRUE),
+    gaussian_p = mean(moy_gp, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca"
+  )
+
+# Récupérer toutes les combinaisons uniques
+combos <- unique(to_plot[, c("region_viticole", "cepage")])
+
+# Boucle d'affichage
+for (i in seq_len(nrow(combos))) {
+  region_i <- combos$region_viticole[i]
+  cepage_i <- combos$cepage[i]
+  
+  df_i <- to_plot %>%
+    filter(region_viticole == region_i, cepage == cepage_i)
+  
+  p <- ggplot(df_i, aes(x = an, y = esca, color = as.factor(age_parcelle_estime), linetype = modele)) +
+    geom_line(linewidth = 1) +
+    scale_linetype_manual(values = c("glm" = "solid", "gaussian_p" = "dashed")) +
+    labs(
+      title = paste("Évolution de l'esca -", region_i, "/", cepage_i),
+      x = "Année",
+      y = "Incidence moyenne",
+      color = "Âge parcelle",
+      linetype = "Modèle"
+    ) + #coord_flip() +
+      # geom_text(data = data_counts, aes(x = as.factor(year), y =  max(date_cepage$flo_SUWE, na.rm = TRUE) + 2, label = n), 
+      #       position = position_dodge(width = 0.75), size = 3) + 
+
+    theme_minimal()
+  
+  print(p)
+}
+```
+
+
+
+## Comparer les périodes :
+
+```{r}
+load("../../data/Projections/Res_period/esca_moy_historical.RData")
+load("../../data/Projections/Res_period/esca_moy_245_2046_2065.RData")
+load("../../data/Projections/Res_period/esca_moy_245_2081_2100.RData")
+load("../../data/Projections/Res_period/esca_moy_585_2046_2065.RData")
+load("../../data/Projections/Res_period/esca_moy_585_2081_2100.RData")
+load("../../data/modelisation/observations_parcelles.RData")
+```
+
+```{r}
+# Récupération de la médiane train d'esca par parcelle
+med_parcelle <- observations %>% group_by(identifiant_parcelle_analyse) %>% summarise(med_parcelle = median(pourcentage_esca))
+med_parcelle$esca_categoriel <- "[0;1["
+med_parcelle[med_parcelle$med_parcelle >= 1,]$esca_categoriel <- "[1;2["
+med_parcelle[med_parcelle$med_parcelle >= 2,]$esca_categoriel <- "[2;5["
+med_parcelle[med_parcelle$med_parcelle >= 5,]$esca_categoriel <- "[5;10["
+med_parcelle[med_parcelle$med_parcelle >= 10,]$esca_categoriel <- "[10;20["
+med_parcelle[med_parcelle$med_parcelle >= 20,]$esca_categoriel <- "[20;100["
+med_parcelle$esca_categoriel <- factor(med_parcelle$esca_categoriel, levels = c("[0;1[", "[1;2[", "[2;5[", "[5;10[", "[10;20[", "[20;100["))
+
+observations <- observations %>% left_join(med_parcelle[, c("identifiant_parcelle_analyse", "esca_categoriel")], by = "identifiant_parcelle_analyse")
+
+```
+
+```{r}
+tt_lm <- data.frame(hist_moy, scenar = rep("historique",141246))
+tt_lm <- rbind(tt_lm, data.frame(scen_245_2046_2065_moy, scenar = rep("245_2046_2065",133812)))
+tt_lm <- rbind(tt_lm, data.frame(scen_245_2081_2100_moy, scenar = rep("245_2081_2100",133812)))
+tt_lm <- rbind(tt_lm, data.frame(scen_585_2046_2065_moy, scenar = rep("585_2046_2065",141246)))
+tt_lm <- rbind(tt_lm, data.frame(scen_585_2081_2100_moy, scenar = rep("585_2081_2100",141246)))
+
+obs_period <- observations %>% 
+  group_by(age_parcelle_estime, esca_categoriel, ID_MAILLE, cepage) %>%
+  summarise(model = "observations", moy_lm = mean(pourcentage_esca), sd_lm = sd(pourcentage_esca), moy_gp = mean(pourcentage_esca), sd_gp = sd(pourcentage_esca))
+
+tt_lm <- rbind(
+  as.data.frame(tt_lm),
+  as.data.frame(obs_period) |>
+    cbind(scenar = rep("réelles", 4703)) |>
+    setNames(names(tt_lm)) # force les noms à être identiques
+)
+
+
+tt_lm <- tt_lm %>% left_join(unique(observations[, c("ID_MAILLE", "region_viticole")]), by = c("maille" = "ID_MAILLE"), relationship = "many-to-one")
+```
+
+```{r, eval=FALSE}
+to_plot <- tt_lm %>%
+  rename(glm = moy_lm, gaussian_p = moy_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca"
+  )
+
+p <- ggplot(to_plot, aes(x=factor(scenar, levels = c("réelles", "historique", "245_2046_2065", "585_2046_2065", "245_2081_2100", "585_2081_2100")), y=esca, fill = modele)) + 
+  geom_boxplot() + ylim(0, 20) +
+    labs(
+      title = paste("Répartition des prédictions / observations"),
+      x = "",
+      y = "Incidence d'esca",
+      color = "Modèle"
+    ) + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "bottom"
+    )
+
+p
+```
+
+
+```{r}
+# Calculer les évolutions par individus, diviser par la moyenne observée de la maille
+moy_obs <- tt_lm[tt_lm$scenar == "réelles",]
+
+# Moyenner les modèles climatiques
+moy_proj <- tt_lm[!tt_lm$scenar == "réelles",] %>% group_by(age_parcelle_estime, esca_categoriel, maille, cepage, region_viticole, scenar) %>% 
+  summarise(moy_lm = mean(moy_lm), moy_gp = mean(moy_gp))
+
+moy_proj <- moy_proj %>% 
+  group_by(age_parcelle_estime, esca_categoriel, maille, cepage, region_viticole) %>%
+  mutate(across(
+    starts_with("moy"),
+    ~ .x - .x[scenar == "historique"],
+    .names = "diff_{.col}"
+  )) %>%
+  ungroup()
+
+moy_proj <- moy_proj[!moy_proj$scenar %in% c("historique"),]
+```
+
+```{r}
+ggplot(moy_proj, aes(x = scenar, y = diff_moy_lm, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    )  + geom_hline(yintercept = 0, linetype="dashed", color = "red") + ylim(c(-3,3)) +
+  labs(
+      title = paste("Lm : Différence entre périodes futures - historiques, par individu"),
+      x = "Scénario",
+      y = "Différence",
+      color = "Scénario"
+    )
+
+ggplot(moy_proj, aes(x = scenar, y = diff_moy_gp, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    )  + geom_hline(yintercept = 0, linetype="dashed", color = "red") + ylim(c(-3,3)) +
+  labs(
+      title = paste("PG : Différence périodes futures - historiques, par individu"),
+      x = "Scénario",
+      y = "Différence",
+      color = "Scénario"
+    )
+```
+
+# Par région :
+
+```{r}
+# Calculer les évolutions par individus, diviser par la moyenne observée de la maille
+moy_obs <- tt_lm[tt_lm$scenar == "réelles",]
+
+# Moyenner les modèles climatiques
+moy_region <- tt_lm[!tt_lm$scenar == "réelles",] %>% group_by(maille, cepage, region_viticole, scenar) %>% 
+  summarise(moy_lm = mean(moy_lm), moy_gp = mean(moy_gp))
+
+moy_region <- moy_region %>% 
+  group_by(maille, cepage, region_viticole) %>%
+  mutate(across(
+    starts_with("moy"),
+    ~ .x - .x[scenar == "historique"],
+    .names = "diff_{.col}"
+  )) %>%
+  ungroup()
+
+moy_region <- moy_region[!moy_region$scenar %in% c("historique"),]
+```
+
+```{r}
+ggplot(moy_region, aes(x = region_viticole, y = diff_moy_lm, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) + ylim(c(-2, 2)) + geom_hline(yintercept = 0, linetype="dashed", color = "red") +
+  labs(
+      title = paste("Lm : Différence entre périodes futures - historiques, par individu, modèles moyennés"),
+      x = "Région viticole",
+      y = "Différence",
+      color = "Scénario"
+    )
+
+ggplot(moy_region, aes(x = region_viticole, y = diff_moy_gp, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) + ylim(c(-2, 2)) + geom_hline(yintercept = 0, linetype="dashed", color = "red") +
+  labs(
+      title = paste("PG : Différence périodes futures - historiques, par individu, modèles moyennés"),
+      x = "Région viticole",
+      y = "Différence",
+      color = "Scénario"
+    )
+```
+
+
+
+
+# Cépages :
+
+```{r}
+moy_cepage <- moy_proj 
+ggplot(moy_cepage, aes(x = cepage, y = diff_moy_lm, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) + ylim(c(-2, 2)) + geom_hline(yintercept = 0, linetype="dashed", color = "red") +
+  labs(
+      title = paste("Lm : Différence entre périodes futures - historiques, par individu, modèles moyennés"),
+      x = "Cépage",
+      y = "Différence",
+      color = "Scénario"
+    )
+
+ggplot(moy_cepage, aes(x = cepage, y = diff_moy_gp, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) + ylim(c(-2, 2)) + geom_hline(yintercept = 0, linetype="dashed", color = "red") +
+  labs(
+      title = paste("PG : Différence périodes futures - historiques, par individu, modèles moyennés"),
+      x = "Cépage",
+      y = "Différence",
+      color = "Scénario"
+    )
+```
+
+
+# Ages :
+
+```{r}
+moy_age <- moy_proj 
+ggplot(moy_age, aes(x = as.factor(age_parcelle_estime), y = diff_moy_lm, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) + ylim(c(-2, 2)) + geom_hline(yintercept = 0, linetype="dashed", color = "red") +
+  labs(
+      title = paste("Lm : Différence entre périodes futures - historiques, par individu, modèles moyennés"),
+      x = "Age",
+      y = "Différence",
+      color = "Scénario"
+    )
+
+ggplot(moy_age, aes(x = as.factor(age_parcelle_estime), y = diff_moy_gp, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) + ylim(c(-2, 2)) + geom_hline(yintercept = 0, linetype="dashed", color = "red") +
+  labs(
+      title = paste("PG : Différence périodes futures - historiques, par individu, modèles moyennés"),
+      x = "Age",
+      y = "Différence",
+      color = "Scénario"
+    )
+```
+
+
+# Caté d'esca : 
+```{r}
+moy_cate <- moy_proj 
+ggplot(moy_cate, aes(x = esca_categoriel, y = diff_moy_lm, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) + ylim(c(- 2, 2)) + geom_hline(yintercept = 0, linetype="dashed", color = "red") +
+  labs(
+      title = paste("Lm : Différence entre périodes futures - historiques, par individu, modèles moyennés"),
+      x = "Catégorie d'esca",
+      y = "Différence",
+      color = "Scénario"
+    )
+
+ggplot(moy_cate, aes(x = esca_categoriel, y = diff_moy_gp, fill = scenar)) + geom_boxplot() + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 12, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) + ylim(c(- 2, 2)) + geom_hline(yintercept = 0, linetype="dashed", color = "red") +
+  labs(
+      title = paste("PG : Différence périodes futures - historiques, par individu, modèles moyennés"),
+      x = "Catégorie d'esca",
+      y = "Différence",
+      color = "Scénario"
+    )
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+
+

@@ -1,0 +1,144 @@
+---
+title: "projections climatiques"
+author: "Gabriel Macé"
+date: "2025-08-25"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+```{r, include = FALSE}
+library(ggplot2)
+library(plotly) # Graphs intéractifs
+library(dplyr)
+library(tidyr)
+library(terra)
+library(tidyterra)
+library(patchwork)
+load("../../data/Projections/Climat_moy/esca_moy_historical.RData")
+load("../../data/Projections/Climat_moy/esca_moy_245_2046_2065.RData")
+load("../../data/Projections/Climat_moy/esca_moy_245_2081_2100.RData")
+load("../../data/Projections/Climat_moy/esca_moy_585_2046_2065.RData")
+load("../../data/Projections/Climat_moy/esca_moy_585_2081_2100.RData")
+```
+
+## Comparer les périodes :
+
+
+```{r}
+tt <- data.frame(hist_moy, scenar = rep("historique",141246))
+tt <- rbind(tt, data.frame(scen_245_2046_2065_moy, scenar = rep("245_2046_2065",133812)))
+tt <- rbind(tt, data.frame(scen_245_2081_2100_moy, scenar = rep("245_2081_2100",133812)))
+tt <- rbind(tt, data.frame(scen_585_2046_2065_moy, scenar = rep("585_2046_2065",141246)))
+tt <- rbind(tt, data.frame(scen_585_2081_2100_moy, scenar = rep("585_2081_2100",141246)))
+tt$scenario <- tt$scenar
+tt[tt$scenario == "245_2046_2065","scenario"] <- "245"
+tt[tt$scenario == "585_2046_2065","scenario"] <- "585"
+tt[tt$scenario == "245_2081_2100","scenario"] <- "245"
+tt[tt$scenario == "585_2081_2100","scenario"] <- "585"
+```
+
+```{r}
+p1 <- ggplot(tt, aes(x=factor(scenar, levels = c("réelles", "historique", "245_2046_2065", "585_2046_2065", "245_2081_2100", "585_2081_2100")), y=debourrement, fill = scenario)) + 
+  geom_boxplot(show.legend = FALSE) + ylim(c(60, 130)) + scale_fill_manual(values=c("#E69F00", "brown", "#999999")) +
+    labs(
+      title = paste("Dates de débourrement"),
+      x = "",
+      y = "") + 
+    theme(
+      axis.text.x = element_blank(),
+      axis.text.y = element_text(size = 12, face="bold")
+    ) 
+
+
+p2 <- ggplot(tt, aes(x=factor(scenar, levels = c("réelles", "historique", "245_2046_2065", "585_2046_2065", "245_2081_2100", "585_2081_2100")), y=floraison, fill = scenario)) + 
+  geom_boxplot(show.legend = FALSE) + ylim(c(120, 185)) + scale_fill_manual(values=c("#E69F00", "brown", "#999999")) +
+    labs(
+      title = paste("Dates de floraison"),
+      x = "",
+      y = "") + 
+    theme(
+      axis.text.x =  element_blank(),
+      axis.text.y = element_text(size = 12, face="bold")
+    ) 
+
+
+p3 <- ggplot(tt, aes(x=factor(scenar, levels = c("réelles", "historique", "245_2046_2065", "585_2046_2065", "245_2081_2100", "585_2081_2100")), y=tm, fill = scenario)) + scale_fill_manual(values=c("#E69F00", "brown", "#999999")) +
+  geom_boxplot(show.legend = FALSE) + ylim(c(8, 22)) +
+    labs(
+      title = paste("Températures moyennes"),
+      x = "",
+      y = "") + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold")
+    ) 
+
+
+p4 <- ggplot(tt, aes(x=factor(scenar, levels = c("réelles", "historique", "245_2046_2065", "585_2046_2065", "245_2081_2100", "585_2081_2100")), y=rr, fill = scenario)) + scale_fill_manual(values=c("#E69F00", "brown", "#999999")) +
+  geom_boxplot() + ylim(c(0, 5)) +
+    labs(
+      title = paste("Nombre de jours de pluie"),
+      x = "",
+      y = "") + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) 
+
+
+p5 <- ggplot(tt, aes(x=factor(scenar, levels = c("réelles", "historique", "245_2046_2065", "585_2046_2065", "245_2081_2100", "585_2081_2100")), y=ftsw, fill = scenario)) + 
+  geom_boxplot() + ylim(c(0.4, 0.85)) + scale_fill_manual(values=c("#E69F00", "brown", "#999999")) +
+    labs(
+      title = paste("FTSW"),
+      x = "",
+      y = "") + 
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10, face="bold"),
+      axis.text.y = element_text(size = 12, face="bold"),
+      legend.text = element_text(size = 10, face="bold"),
+      legend.position = "bottom"
+    ) 
+
+
+wrap_plots(list(p1, p2, p3, p5), ncol = 2, guides = "collect") + plot_annotation("Evolution du climat", theme=theme(plot.title=element_text(hjust=0.5))) & theme(legend.position = "bottom")
+```
+
+
+
+
+
