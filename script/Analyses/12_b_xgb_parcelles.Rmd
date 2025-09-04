@@ -1,0 +1,538 @@
+---
+title: "XGBoost en connaissant la médiane d'esca"
+author: "Gabriel Macé"
+date: "2025-07-02"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+```{r}
+library(reticulate)
+# Dis à R d’utiliser le bon environnement Python
+use_python("C:/Users/Lucas/AppData/Local/r-miniconda/envs/bayesenv/python.exe", required = TRUE)
+```
+
+```{python}
+# Importation des bibliothèques nécessaires
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split,cross_val_score
+import pyreadr
+```
+
+```{python}
+# Chargement des données
+observations = pyreadr.read_r("../../data/modelisation/observations_parcelles.RData")["observations"]
+observations = pd.DataFrame(observations)
+```
+
+### Préparation des données :
+
+```{python}
+var_an_pheno = list(observations.columns[12:47]) # ne pas garder la longueur de la période = 365 ou 366
+var_an = list(observations.columns[49:84]) # ne pas garder la longueur de la période
+var_dormance = list(observations.columns[85:121])
+var_deb_to_flo = list(set(observations.columns[122:158]) - set(["sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"]))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes = list(set(observations.columns[159:195]) - set(["sum.frost.days.0.symptomes"])) # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end = list(observations.columns[196:232])
+
+var_tt = var_an_pheno + var_dormance + var_deb_to_flo + var_symptomes + var_deb_to_end
+
+# Enlever le swi :
+var_tt = list(set(var_tt) - set(["swi", "swi.dormance", "swi.deb_flo", "swi.symptomes", "swi.deb_end"]))
+
+observations['cepage'] = observations['cepage'].astype('category')
+observations['region_viticole'] = observations['region_viticole'].astype('category')
+```
+
+```{python}
+import xicorpy
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+vars = var_tt + list(["age_parcelle_estime", "RU", "debourrement", "floraison" ])
+score_var = []
+
+for var1 in vars:
+  score_var.append(xicorpy.compute_xi_correlation(observations[var1], observations["pourcentage_esca"]).values[0][0])
+  
+score_var = pd.DataFrame({'variable':vars, 'r':score_var})
+
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+
+to_rm = []
+for var1 in vars:
+    if var1 not in to_rm:
+        for var2 in list(set(vars) - set([var1] + to_rm)):
+            corr = xicorpy.compute_xi_correlation(observations[var1], observations[var2]).values[0][0]
+            if corr > 0.8:
+                r1 = score_var.loc[score_var["variable"] == var1, "r"].values[0]
+                r2 = score_var.loc[score_var["variable"] == var2, "r"].values[0]
+                if r1 > r2:
+                    to_rm.append(var1)
+                else:
+                    to_rm.append(var2)
+                break
+```
+
+```{python, cache=TRUE}
+# Division des données en ensemble d'apprentissage et de test
+train_ratio = 0.8
+
+# Trier les observations par année
+obs_sort = observations.sort_values(by="annee")
+
+# Initialisation des jeux
+train_parts = []
+test_parts = []
+
+# Regroupement par identifiant
+grouped = obs_sort.groupby("identifiant_parcelle_analyse")
+
+for _, group in grouped:
+    n = len(group)
+    group = group.reset_index(drop=True)  # pour un index de 0 à n-1
+    if n <= 5:
+        train_index, test_index = train_test_split(range(0,n), test_size=0.3) # int(np.ceil(n / 2))
+    else:
+        train_index, test_index = train_test_split(range(0,n), test_size=0.2) # int(np.floor(n * train_ratio))
+    
+    train_parts.append(group.iloc[train_index])
+    test_parts.append(group.iloc[test_index])
+
+# Concaténer les groupes pour obtenir les jeux complets
+train = pd.concat(train_parts).reset_index(drop=True)
+test = pd.concat(test_parts).reset_index(drop=True)
+```
+
+```{python, cache=TRUE}
+esca_parcelle = train.groupby('identifiant_parcelle_analyse').agg({'pourcentage_esca': 'median'}).rename(columns={'pourcentage_esca': 'median_esca'})
+esca_parcelle.median_esca = round(esca_parcelle.median_esca)
+
+esca_parcelle = esca_parcelle.assign(esca_categoriel = 0)
+esca_parcelle.loc[esca_parcelle.median_esca >= 1,'esca_categoriel'] = 1 
+esca_parcelle.loc[esca_parcelle.median_esca >= 2,'esca_categoriel'] = 2
+esca_parcelle.loc[esca_parcelle.median_esca >= 5,'esca_categoriel'] = 3
+esca_parcelle.loc[esca_parcelle.median_esca >= 10,'esca_categoriel'] = 4
+esca_parcelle.loc[esca_parcelle.median_esca >= 20,'esca_categoriel'] = 5
+esca_parcelle.esca_categoriel = esca_parcelle['esca_categoriel'].astype('category')
+
+train = pd.merge(train, esca_parcelle['esca_categoriel'], on = "identifiant_parcelle_analyse")
+train['esca_categoriel'] = train['esca_categoriel'].astype('category')
+test = pd.merge(test, esca_parcelle, on = "identifiant_parcelle_analyse")
+test['esca_categoriel'] = test['esca_categoriel'].astype('category')
+
+to_keep = list(["cepage", "esca_categoriel", "region_viticole"]) + list(set(vars) - set(to_rm))
+
+X_train = pd.get_dummies(train[to_keep])
+X_test = pd.get_dummies(test[to_keep])
+
+y_train = train['pourcentage_esca']
+y_test = test['pourcentage_esca']
+```
+
+## XGBoost
+
+```{python}
+from xgboost import XGBRegressor
+```
+
+```{python, cache=TRUE}
+best_model = XGBRegressor(learning_rate = 0.1, max_depth = 6, n_estimators = 400, objective = 'count:poisson')
+# quali : 4, 500
+best_model.fit(X_train, y_train)
+y_train_pred = best_model.predict(X_train)
+y_test_pred = best_model.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+### Valeurs de Shapley
+
+```{python, cache=TRUE}
+obs = observations.copy()
+
+esca_parcelle = obs.groupby('identifiant_parcelle_analyse').agg({'pourcentage_esca': 'median'}).rename(columns={'pourcentage_esca': 'median_esca'})
+esca_parcelle.median_esca = round(esca_parcelle.median_esca)
+
+esca_parcelle = esca_parcelle.assign(esca_categoriel = 0)
+esca_parcelle.loc[esca_parcelle.median_esca >= 1,'esca_categoriel'] = 1 
+esca_parcelle.loc[esca_parcelle.median_esca >= 2,'esca_categoriel'] = 2
+esca_parcelle.loc[esca_parcelle.median_esca >= 5,'esca_categoriel'] = 3
+esca_parcelle.loc[esca_parcelle.median_esca >= 10,'esca_categoriel'] = 4
+esca_parcelle.loc[esca_parcelle.median_esca >= 20,'esca_categoriel'] = 5
+esca_parcelle.esca_categoriel = esca_parcelle['esca_categoriel'].astype('category')
+
+obs = pd.merge(obs, esca_parcelle['esca_categoriel'], on = "identifiant_parcelle_analyse")
+obs['esca_categoriel'] = obs['esca_categoriel'].astype('category')
+
+
+to_keep = list(["cepage", "esca_categoriel", "region_viticole"]) + list(set(vars) - set(to_rm))
+
+X = pd.get_dummies(obs[to_keep])
+y = obs['pourcentage_esca']
+
+best_model = XGBRegressor(learning_rate = 0.1, max_depth = 6, n_estimators = 400, objective = 'count:poisson')
+best_model.fit(X, y)
+y_pred = best_model.predict(X)
+```
+
+```{python, cache=TRUE}
+import shap
+# Initialisation du Javascript
+# shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(best_model)
+
+# Calcul des valeurs SHAP
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+```{python}
+# Importance des variables dans le processus de décision des arbres (non shapley) ~ nombre de fois où la variable intervient dans une décision :
+import matplotlib.pyplot as plt
+from xgboost import plot_importance
+
+# Affichage de l'importance des caractéristiques
+# plot_importance(best_model, max_num_features=10)
+# plt.gca().tick_params(labelsize=7)
+# plt.show()
+# plt.clf()
+```
+
+```{python, cache=TRUE}
+# Valeurs de shap :
+# Tracer le graphique SHAP de synthèse
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=20, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+```{python, cache=TRUE}
+# Graphique SHAP résumé pour l'interprétabilité globale
+shap.summary_plot(shap_values, X, max_display=20, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+```{python, cache=TRUE}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-20:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+## Processus Gaussiens
+
+```{python}
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import *
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+```
+
+```{python}
+# Division des données en ensemble d'apprentissage et de test
+train_ratio = 0.8
+
+# Trier les observations par année
+obs_sort = observations.sort_values(by="annee")
+
+# Initialisation des jeux
+train_parts = []
+test_parts = []
+
+# Regroupement par identifiant
+grouped = obs_sort.groupby("identifiant_parcelle_analyse")
+
+for _, group in grouped:
+    n = len(group)
+    group = group.reset_index(drop=True)  # pour un index de 0 à n-1
+    if n <= 5:
+        train_index, test_index = train_test_split(range(0,n), test_size=0.3) # int(np.ceil(n / 2))
+    else:
+        train_index, test_index = train_test_split(range(0,n), test_size=0.2) # int(np.floor(n * train_ratio))
+    
+    train_parts.append(group.iloc[train_index])
+    test_parts.append(group.iloc[test_index])
+
+# Concaténer les groupes pour obtenir les jeux complets
+train = pd.concat(train_parts).reset_index(drop=True)
+test = pd.concat(test_parts).reset_index(drop=True)
+```
+
+```{python}
+to_use = ["age_parcelle_estime", "et0.symptomes", "tv.deb_flo", "rr.deb_end", "VPD.symptomes", "rain.days", "tm.dormance", "rr.deb_flo", "auc_isv.symptomes", "tm.symptomes", "isv.deb_flo", "hu.dormance", "bh0.symptomes", "VPD.dormance", "VPD.deb_flo", "sum.heat.days.25.deb_flo", "rr", "sum.days.isv.faible", "sum.days.isv.fai_mod.dormance", "rr.symptomes", "sum.days.isv.sev.dormance", "auc_isv.dormance", "RU", "debourrement", "floraison"]
+
+# avant "RU" -> variables mises en avant par XGBoost / SHAP
+# "RU" et après : moi + modèle linéaire
+
+esca_parcelle = train.groupby('identifiant_parcelle_analyse').agg({'pourcentage_esca': 'median'}).rename(columns={'pourcentage_esca': 'median_esca'})
+esca_parcelle.median_esca = round(esca_parcelle.median_esca)
+
+esca_parcelle = esca_parcelle.assign(esca_categoriel = 0)
+esca_parcelle.loc[esca_parcelle.median_esca >= 1,'esca_categoriel'] = 1 
+esca_parcelle.loc[esca_parcelle.median_esca >= 2,'esca_categoriel'] = 2
+esca_parcelle.loc[esca_parcelle.median_esca >= 5,'esca_categoriel'] = 3
+esca_parcelle.loc[esca_parcelle.median_esca >= 10,'esca_categoriel'] = 4
+esca_parcelle.loc[esca_parcelle.median_esca >= 20,'esca_categoriel'] = 5
+# esca_parcelle.esca_categoriel = esca_parcelle['esca_categoriel'].astype('category')
+
+train = pd.merge(train, esca_parcelle['esca_categoriel'], on = "identifiant_parcelle_analyse")
+train['esca_categoriel'] = train['esca_categoriel'].astype('category')
+test = pd.merge(test, esca_parcelle, on = "identifiant_parcelle_analyse")
+test['esca_categoriel'] = test['esca_categoriel'].astype('category')
+
+to_keep = list(["cepage", "region_viticole"]) + to_use
+
+
+X_train = pd.get_dummies(train[to_keep])
+X_test = pd.get_dummies(test[to_keep])
+
+y_train = train['pourcentage_esca']
+y_test = test['pourcentage_esca']
+```
+
+```{python}
+scaler = StandardScaler()
+X_train_scl = scaler.fit_transform(X_train)
+X_test_scl = scaler.transform(X_test)
+
+from sklearn.decomposition import PCA
+pca = PCA(n_components=11)  # n_components= 4 
+X_train_pca = pd.DataFrame(pca.fit_transform(X_train_scl))
+np.sum(pca.explained_variance_ratio_)
+
+X_test_pca = pd.DataFrame(pca.transform(X_test_scl))
+X_train_pca = X_train_pca.rename(columns={0: "Dim_1", 1: "Dim_2", 2: "Dim_3", 3: "Dim_4", 4: "Dim_5", 5: "Dim_6", 6: "Dim_7", 7: "Dim_8", 8: "Dim_9", 9: "Dim_10", 10: "Dim_11"})
+X_test_pca = X_test_pca.rename(columns={0: "Dim_1", 1: "Dim_2", 2: "Dim_3", 3: "Dim_4", 4: "Dim_5", 5: "Dim_6", 6: "Dim_7", 7: "Dim_8", 8: "Dim_9", 9: "Dim_10", 10: "Dim_11"})
+
+X_train_pca['esca_categoriel'] = train['esca_categoriel']
+X_test_pca['esca_categoriel'] = test['esca_categoriel']
+```
+
+```{python}
+gpr_cv = GaussianProcessRegressor(kernel=Matern(),
+        random_state=0, normalize_y=True, alpha=0.25, n_restarts_optimizer=0).fit(X_train_pca, y_train)
+# normalize_y = True, 'alpha': 0.25, 'kernel': Matern(length_scale=1, nu=1.5), Test r²: 0.533
+
+y_train_pred = gpr_cv.predict(X_train_pca, return_std=True)
+y_test_pred = gpr_cv.predict(X_test_pca, return_std=True)
+
+mean_prediction = y_test_pred[0]
+std_prediction =  y_test_pred[1]
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred[0])**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred[0])))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred[0])[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred[0])**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred[0])))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred[0])[0,1]**2)
+```
+
+
+### Valeurs de shapley :
+
+```{python}
+obs = observations.copy()
+
+esca_parcelle = obs.groupby('identifiant_parcelle_analyse').agg({'pourcentage_esca': 'median'}).rename(columns={'pourcentage_esca': 'median_esca'})
+esca_parcelle.median_esca = round(esca_parcelle.median_esca)
+
+esca_parcelle = esca_parcelle.assign(esca_categoriel = 0)
+esca_parcelle.loc[esca_parcelle.median_esca >= 1,'esca_categoriel'] = 1 
+esca_parcelle.loc[esca_parcelle.median_esca >= 2,'esca_categoriel'] = 2
+esca_parcelle.loc[esca_parcelle.median_esca >= 5,'esca_categoriel'] = 3
+esca_parcelle.loc[esca_parcelle.median_esca >= 10,'esca_categoriel'] = 4
+esca_parcelle.loc[esca_parcelle.median_esca >= 20,'esca_categoriel'] = 5
+# esca_parcelle.esca_categoriel = esca_parcelle['esca_categoriel'].astype('category')
+
+obs = pd.merge(obs, esca_parcelle['esca_categoriel'], on = "identifiant_parcelle_analyse")
+obs['esca_categoriel'] = obs['esca_categoriel'].astype('category')
+
+
+to_keep = list(["cepage", "region_viticole"]) + to_use
+
+X = pd.get_dummies(obs[to_keep])
+y = obs['pourcentage_esca']
+```
+
+```{python}
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)  # X contient les dummies déjà
+means = scaler.mean_
+stds = scaler.scale_
+
+
+from sklearn.decomposition import PCA
+pca = PCA(n_components=11)  # n_components= 4 
+X_pca = pd.DataFrame(pca.fit_transform(X_scaled))
+np.sum(pca.explained_variance_ratio_)
+W = pca.components_.T
+
+X_pca = X_pca.rename(columns={0: "Dim_1", 1: "Dim_2", 2: "Dim_3", 3: "Dim_4", 4: "Dim_5", 5: "Dim_6", 6: "Dim_7", 7: "Dim_8", 8: "Dim_9", 9: "Dim_10", 10: "Dim_11"})
+
+X_tt = X_pca.copy()
+X_tt['esca_categoriel'] = obs['esca_categoriel']
+```
+
+```{python}
+gp = GaussianProcessRegressor(kernel=Matern(), random_state=0, normalize_y=True, alpha=0.25, n_restarts_optimizer=0).fit(X_tt, y)
+
+# Enregister le modèle :
+import pickle
+pickle.dump(gp, open("../../modeles/gaussian_process_final.sav", 'wb'))
+pickle.dump(pca, open("../../modeles/acp.sav", 'wb'))
+pickle.dump(scaler, open("../../modeles/scaler.sav", 'wb'))
+#  
+# Récuperer le modèle enregistré :
+gp = pickle.load(open("../../modeles/gaussian_process_final.sav", 'rb'))
+
+y_pred = gp.predict(X_tt)
+
+X['esca_categoriel'] = obs['esca_categoriel']
+```
+
+```{python, cache=TRUE}
+import shap
+
+# X_sample = shap.sample(X_tt, 1000)
+
+explainer = shap.Explainer(gp.predict, X_tt)
+shap_values = explainer(X_tt)
+
+# explainer = shap.KernelExplainer(gp.predict, X_sample)
+# shap_values = explainer.shap_values(X_sample)
+```
+
+```{python, cache=TRUE}
+shap_values_std = np.dot(shap_values.values[:, :11], W.T)
+shap_values_orig = shap_values_std / stds
+shap_values_orig = np.column_stack((shap_values_orig, shap_values.values[:, 11])) # Re ajouter les médianes parcelles 
+```
+
+```{python, cache=TRUE}
+# Valeurs de shap :
+# Tracer le graphique SHAP de synthèse
+shap.summary_plot(shap_values_orig, X, plot_type="bar", max_display=30, show=False) # X.iloc[X_sample.index]
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+```{python, cache=TRUE}
+# Graphique SHAP résumé pour l'interprétabilité globale
+shap.summary_plot(shap_values_orig, X, max_display=10, show=False) # X.iloc[X_sample.index]
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values_orig).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature, idx in zip(top10_features, top10_idx):
+  print(feature)
+  print(idx)
+  x_vals = X[feature]  # Valeurs de la variable # [X_sample.index]
+  y_vals = shap_values_orig[:, idx]  # SHAP values correspondantes
+  color_vals = y_pred  # Variable cible # [X_sample.index]
+
+  plt.figure(figsize=(8, 6))
+  sc = plt.scatter(x_vals, y_vals, c=color_vals, cmap='bwr', s=30, alpha=0.7, vmin = 0, vmax = 15)
+  plt.colorbar(sc, label="Pourcentage esca")
+  plt.xlabel(feature)
+  plt.ylabel(f"SHAP value for {feature}")
+  plt.title(f"SHAP dependence plot coloré par y ({feature})")
+  plt.grid(True)
+  plt.tight_layout()
+  plt.show()
+  plt.clf()
+```
+
+```{python}
+
+```
+
+```{python}
+
+```
+
+```{python}
+
+```

@@ -1,0 +1,329 @@
+---
+title: "Gaussian Process par régions"
+author: "Gabriel Macé"
+date: "2025-06-17"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+```{r}
+library(reticulate)
+# Dis à R d’utiliser le bon environnement Python
+use_python("C:/Users/Lucas/AppData/Local/r-miniconda/envs/bayesenv/python.exe", required = TRUE)
+```
+
+```{python}
+# Importation des bibliothèques nécessaires
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split,cross_val_score
+import pyreadr
+```
+
+```{python}
+# Chargement des données
+observations = pyreadr.read_r("../../data/modelisation/observations.RData")["observations"]
+observations = pd.DataFrame(observations)
+```
+
+### Préparation des données :
+
+```{python}
+var_an_pheno = list(observations.columns[12:47]) # ne pas garder la longueur de la période = 365 ou 366
+var_an = list(observations.columns[49:84]) # ne pas garder la longueur de la période
+var_dormance = list(observations.columns[85:121])
+var_deb_to_flo = list(set(observations.columns[122:158]) - set(["sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"]))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes = list(set(observations.columns[159:195]) - set(["sum.frost.days.0.symptomes"])) # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end = list(observations.columns[196:232])
+
+var_tt = var_an_pheno + var_an + var_dormance + var_deb_to_flo + var_symptomes + var_deb_to_end
+
+observations.loc[observations.region_viticole == "Cotes-du-Rhone nord", "region_viticole"] = "Cotes-du-Rhone"
+observations.loc[observations.region_viticole == "Cotes-du-Rhone sud", "region_viticole"] = "Cotes-du-Rhone"
+observations['cepage'] = observations['cepage'].astype('category')
+observations['region_viticole'] = observations['region_viticole'].astype('category')
+```
+
+
+
+La sélection des variables se fait en fonction des réusltats des XGBoost par régions.
+```{python}
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+to_use = ["cepage", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.dormance", "swi.dormance", "auc_isv.symptomes", "tv.deb_end"]
+```
+
+
+```{python}
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import *
+from sklearn.decomposition import PCA
+
+rmse = []
+mae = []
+
+for region in np.unique(observations.region_viticole):
+  print(region)
+  data =  observations.loc[observations.region_viticole == region]
+  X = pd.get_dummies(data[to_use])
+  y = data['pourcentage_esca']
+  X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+  scaler = StandardScaler()
+  var_cont = list(set(to_use) - set(["cepage"]))
+  X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+  X_test[var_cont] = scaler.transform(X_test[var_cont])
+  pca = PCA(n_components=8)
+  X_train = pca.fit_transform(X_train)
+  np.sum(pca.explained_variance_ratio_)
+  
+  X_test = pca.transform(X_test)
+  gpr = GaussianProcessRegressor(kernel=Matern(),  
+  random_state=0, normalize_y=True, alpha=0.1, n_restarts_optimizer=0).fit(X_train, y_train)
+
+  y_test_pred = gpr.predict(X_test, return_std=True)[0]
+  
+  rmse = rmse + list([np.sqrt(np.mean((y_test - y_test_pred)**2))])
+  mae = mae + list([np.mean(np.abs(y_test - y_test_pred))])
+  
+res = pd.DataFrame({'region' : np.unique(observations.region_viticole), 'rmse' : rmse, 'mae' : mae})
+res
+```
+
+```{python}
+
+```
+
+```{python}
+
+```
+
+
+
+```{python}
+# Créer un dictionnaire donnant les variables sélectionnées par région :
+var_select = {
+  "Alsace" = [],
+  "Bordelais" = [],
+  "Bourgogne" = [],
+  "Champagne" = [],
+  "Charentes" = [],
+  "Cotes-du-Rhone" = [],
+  "Jura" = [],
+  "Languedoc" = [],
+  "Provence" = [],
+  "Val de loire" = []
+}
+```
+
+```{python}
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import *
+from sklearn.decomposition import PCA
+
+
+r2s = []
+mae = []
+
+for region in np.unique(observations.region_viticole):
+  print(region)
+  data =  observations.loc[observations.region_viticole == region]
+  X = pd.get_dummies(data[to_use])
+  y = data['pourcentage_esca']
+  X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+  scaler = StandardScaler()
+  var_cont = list(set(to_use) - set(["cepage"]))
+  X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+  X_test[var_cont] = scaler.transform(X_test[var_cont])
+  pca = PCA(n_components=8)
+  X_train = pca.fit_transform(X_train)
+  np.sum(pca.explained_variance_ratio_)
+  
+  X_test = pca.transform(X_test)
+  gpr = GaussianProcessRegressor(kernel=Matern(),  
+  random_state=0, normalize_y=True, alpha=0.1, n_restarts_optimizer=0).fit(X_train, y_train)
+
+  y_test_pred = gpr.predict(X_test, return_std=True)[0]
+  
+  r2s = r2s + list([np.corrcoef(y_test, y_test_pred)[0,1]**2])
+  mae = mae + list([np.mean(np.abs(y_test - y_test_pred))])
+  
+res = pd.DataFrame({'region' : np.unique(observations.region_viticole), 'r2' : r2s, 'mae' : mae})
+res
+```
+
+```{python}
+# A voir mais pas sur car petit effectifs pour certaines régions
+# from sklearn.gaussian_process import GaussianProcessRegressor
+# from sklearn.gaussian_process.kernels import *
+# from sklearn.model_selection import  GridSearchCV
+# 
+# # Définition des paramètres à optimiser
+# param_grid = {
+#     # Noyau des covariances
+#     'kernel': [DotProduct() + WhiteKernel(), RBF(), RationalQuadratic(), Matern(), 1**2 * RBF(length_scale=1)], # , ExpSineSquared()
+#     
+#     # Covariance des erreurs
+#     'alpha': [0.05, 0.1, 0.5, 1, 1.25, 1.5, 2]
+# }
+# 
+# # Création de l'objet GridSearch
+# model = GaussianProcessRegressor(normalize_y=True)
+# grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=1, verbose=0)
+
+# Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+
+# Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+# Best parameters found:  {'alpha': 0.5, 'kernel': Matern(length_scale=1, nu=1.5)}
+```
+
+### Alsace 
+
+```{python}
+to_use = []# Age 10-20 / 20-30 ?
+data =  observations.loc[observations.region_viticole == "Alsace"]
+X = pd.get_dummies(data[to_use])
+y = data['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+scaler = StandardScaler()
+var_cont = list(set(to_use) - set(["cepage"]))
+X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+X_test[var_cont] = scaler.transform(X_test[var_cont])
+pca = PCA(n_components=8)
+X_train = pca.fit_transform(X_train)
+np.sum(pca.explained_variance_ratio_) # Pourcentage de variance expliquée par les dimensions de l'ACP
+X_test = pca.transform(X_test)
+```
+
+```{python}
+gpr = GaussianProcessRegressor(kernel=Matern(),  
+random_state=0, normalize_y=True, alpha=0.1, n_restarts_optimizer=0).fit(X_train, y_train) # Sélectionner les bons hyperparametres
+
+y_test_pred = gpr.predict(X_test, return_std=True)[0]
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+```{python}
+# Ajuster le modèle sur l'ensemble des observations :
+scaler = StandardScaler()
+var_cont = list(set(to_use) - set(["cepage"]))
+X[var_cont] = scaler.fit_transform(X[var_cont])
+pca = PCA(n_components=8)
+X = pca.fit_transform(X)
+
+alsace_gp = GaussianProcessRegressor(kernel=Matern(),  
+random_state=0, normalize_y=True, alpha=0.1, n_restarts_optimizer=0).fit(X, y) # Sélectionner les bons hyperparametres
+
+# Enregister le modèle :
+import pickle
+pickle.dump(alsace_gp, open("../../modeles/alsace_lm.sav", 'wb'))
+ 
+# Récuperer le modèle enregistré :
+# alsace_gp = pickle.load(open("../../modeles/alsace_lm.sav", 'rb'))
+
+
+# Save the model to disk
+# with open('../../modeles/alsace_lm.pkl', 'wb') as file:
+#   pickle.dump(alsace_gp, file)
+# with open('../../modeles/alsace_lm.pkl', 'rb') as file:
+#   alsace_gp = pickle.load(file)
+```
+
+```{python}
+
+```
+
+```{python}
+
+```
+
+```{python}
+
+```
+
+```{python}
+
+```
+
+```{python}
+
+```
+
+```{python}
+
+```
+
+```{python}
+
+```
+
+
