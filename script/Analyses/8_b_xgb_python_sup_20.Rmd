@@ -1,0 +1,746 @@
+---
+title: "xgb avec Python"
+author: "Gabriel Macé"
+date: "2025-05-26"
+output: html_document
+---
+
+Ce script écrit en python, a pour but d'essayer de trouver un modèle binaire permettant de séparer les observations dont l'incidence d'esca est forte (ex : >=20), car les modèles de régression ont du mal à prédire ces valeurs.
+
+Après de nombreux essais de pre-processing et de modèles, il semble très difficile de dissocier ces valeurs des autres.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# Utiliser python via reticulate et miniconda :
+library(reticulate)
+
+# Ou alors créer un environnement python (ex : "bayesenv") et l'utiliser (cela peut être utile pour les gros packages)
+# Dis à R d’utiliser le bon environnement Python
+# use_python("C:/Users/Lucas/AppData/Local/r-miniconda/envs/bayesenv/python.exe", required = TRUE)
+```
+
+```{r}
+# Les librairies python à installer : 
+# py_install("pyod", pip = TRUE) # XGBOD
+# py_install("tensorflow", pip = TRUE) # Réseaux de neurones
+```
+
+
+```{python}
+# Importation des bibliothèques nécessaires
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from sklearn.tree import DecisionTreeClassifier, plot_tree
+from sklearn.model_selection import train_test_split,cross_val_score
+from sklearn.metrics import classification_report
+import pyreadr
+```
+
+```{python}
+# Chargement des données
+observations = pyreadr.read_r("../../data/modelisation/observations.RData")["observations"]
+observations = pd.DataFrame(observations)
+# observations = observations.loc[observations.pourcentage_esca > 0]
+```
+
+### Préparation des données :
+
+```{python}
+var_an_pheno = list(observations.columns[12:47]) # ne pas garder la longueur de la période = 365 ou 366
+var_an = list(observations.columns[49:84]) # ne pas garder la longueur de la période
+var_dormance = list(observations.columns[85:121])
+var_deb_to_flo = list(set(observations.columns[122:158]) - set(["sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"]))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes = list(set(observations.columns[159:195]) - set(["sum.frost.days.0.symptomes"])) # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end = list(observations.columns[196:232])
+
+var_tt = var_an_pheno + var_an + var_dormance + var_deb_to_flo + var_symptomes + var_deb_to_end
+
+observations['cepage'] = observations['cepage'].astype('category')
+observations['region_viticole'] = observations['region_viticole'].astype('category')
+```
+
+
+```{python}
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+
+score_var = pd.read_excel("../../data/resultats/r2_rmse_par_variable.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars = var_tt + list(["age_parcelle_estime", "RU", "debourrement", "floraison" ])
+to_rm = []
+for var1 in vars:
+    if var1 not in to_rm:
+        for var2 in list(set(vars) - set([var1] + to_rm)):
+            corr = np.corrcoef(observations[var1], observations[var2])[0, 1]
+            if corr > 0.8:
+                rmse1 = score_var.loc[score_var["variable"] == var1, "rmse"].values[0]
+                rmse2 = score_var.loc[score_var["variable"] == var2, "rmse"].values[0]
+                if rmse1 > rmse2:
+                    to_rm.append(var1)
+                else:
+                    to_rm.append(var2)
+                break
+
+
+to_keep = list(["cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+# to_keep = list(set(vars) - set(to_rm))
+features = pd.get_dummies(observations[to_keep])
+```
+
+## Binaire : sup 20 :
+
+On peut faire avec 15 mais c'est plus dur à dissocier
+
+
+```{python}
+### Création des variables "cibles" : dire si l'incidence est supérieur ou égale à une valeur :
+observations = observations.assign(sup_20 = 0)
+observations.loc[observations.pourcentage_esca >= 20,'sup_20'] = 1 
+
+observations = observations.assign(sup_15 = 0)
+observations.loc[observations.pourcentage_esca >= 15,'sup_15'] = 1 
+
+# observations = observations.loc[observations.pourcentage_esca != 0]
+
+observations = observations.assign(sup_0 = 0)
+observations.loc[observations.pourcentage_esca == 0,'sup_0'] = 1 
+```
+
+
+## Outliers :
+
+Utilisation de modèles de détection de "valeurs extrêmes" (outliers), et regarder si les outliers correspond aux incidences >=20, ou aux 0. Spoiler : non.
+
+```{python}
+# import IF and instantiate the class
+# from sklearn.ensemble import IsolationForest
+# clf = IsolationForest(random_state=0)
+# # 
+X = pd.get_dummies(observations[to_keep])
+# # 
+# # train IF and get the predictions
+# pred = clf.fit_predict(X)
+
+# from sklearn.neighbors import LocalOutlierFactor
+# clf = LocalOutlierFactor(n_neighbors=15)
+# pred = clf.fit_predict(X)
+
+from sklearn.svm import OneClassSVM
+clf = OneClassSVM(gamma='auto').fit(X)
+pred = clf.predict(X)
+```
+
+```{python}
+pd.crosstab(observations.sup_20, pred)
+# true = à gauche, prédiction = en haut
+pd.crosstab(observations.sup_0, pred) # [1][1]
+```
+```{python}
+train, test = train_test_split(observations, test_size=0.2, stratify = observations.sup_20)
+
+idx_train = np.random.choice(train.loc[train.pourcentage_esca >= 20].index, size=4000, replace=True, p=None)
+train_augmented = pd.concat([train, train.loc[idx_train]])
+y_train = train_augmented['sup_20']
+X_train = pd.get_dummies(train_augmented[to_keep])
+esca_train = train_augmented['pourcentage_esca']
+
+test_augmented = test
+y_test = test_augmented['sup_20']
+X_test = pd.get_dummies(test_augmented[to_keep])
+esca_test = test_augmented['pourcentage_esca']
+
+clf = OneClassSVM(gamma='auto').fit(X_train)
+pred = clf.predict(X_test)
+
+
+pd.crosstab(y_test, pred)
+```
+
+
+
+## XGBoost :
+
+```{python}
+# Préparation des données
+X = pd.get_dummies(observations[to_keep])
+y = observations['sup_20']
+esca = observations['pourcentage_esca']
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test, esca_train, esca_test = train_test_split(X, y, esca, test_size=0.2)
+```
+
+
+### XGBoost et CV sur variables sélectionnées
+
+```{python}
+### Création de la grille des hyperparamètres à tester par cross-validation
+from sklearn.model_selection import  GridSearchCV
+from xgboost import XGBClassifier
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9, 12],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 150, 200, 500],
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=1, verbose=0)
+```
+
+```{python, eval = FALSE}
+# Entraînement du modèle avec cross validation
+grid_search.fit(X_train, y_train)
+
+# Affichage des meilleurs paramètres
+print("Best parameters found: ", grid_search.best_params_)
+# {'learning_rate': 0.1, 'max_depth': 12, 'n_estimators': 200}
+# {'learning_rate': 0.05, 'max_depth': 12, 'n_estimators': 500}
+# Mais change pas grand chose, ça marche pas bien
+```
+
+
+
+
+```{python}
+### Pour essayer en augmentant par boostrapping le nombre d'incidence >= 20, afin d'avoir 2 classes équilibrées :
+# Préparation des données
+# Division des données en ensemble d'apprentissage et de test
+# train, test = train_test_split(observations, test_size=0.2, stratify = observations.sup_20)
+# 
+# idx_train = np.random.choice(train.loc[train.pourcentage_esca >= 20].index, size=4000, replace=True, p=None)
+# train_augmented = pd.concat([train, train.loc[idx_train]])
+# y_train = train_augmented['sup_20']
+# X_train = pd.get_dummies(train_augmented[to_keep])
+# esca_test = train_augmented['pourcentage_esca']
+# 
+# idx_test = np.random.choice(test.loc[test.pourcentage_esca >= 20].index, size=1000, replace=True, p=None)
+# test_augmented = pd.concat([test, test.loc[idx_test]])
+# y_test = test_augmented['sup_20']
+# X_test = pd.get_dummies(test_augmented[to_keep])
+# esca_test = test_augmented['pourcentage_esca']
+```
+
+```{python}
+# Préparation des données
+X = pd.get_dummies(observations[to_keep])
+y = observations['sup_20']
+esca = observations['pourcentage_esca']
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test, esca_train, esca_test = train_test_split(X, y, esca, test_size=0.2)
+
+from xgboost import XGBClassifier
+classifieur = XGBClassifier(learning_rate = 0.1, max_depth = 20, n_estimators = 1000, scale_pos_weight=96/4, eval_metric='logloss')
+# 0.5, 9, 50 = ~27 erreurs tests
+classifieur.fit(X_train, y_train)
+y_train_pred = classifieur.predict(X_train)
+y_test_pred = classifieur.predict(X_test)
+```
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+pd.crosstab(y_test, y_test_pred) # [1][1]
+```
+
+```{python}
+train, test = train_test_split(observations, test_size=0.2, stratify = observations.sup_20)
+
+idx_train = np.random.choice(train.loc[train.pourcentage_esca >= 20].index, size=4000, replace=True, p=None)
+train_augmented = pd.concat([train, train.loc[idx_train]])
+y_train_augmented = train_augmented['sup_20']
+X_train_augmented = pd.get_dummies(train_augmented[to_keep])
+
+test_augmented = test
+y_test_augmented = test_augmented['sup_20']
+X_test_augmented = pd.get_dummies(test_augmented[to_keep])
+
+classifieur = XGBClassifier(learning_rate = 0.1, max_depth = 20, n_estimators = 1000, eval_metric='logloss')
+# 0.5, 9, 50 = ~27 erreurs tests
+classifieur.fit(X_train_augmented, y_train_augmented)
+y_test_pred = classifieur.predict(X_test_augmented)
+
+pd.crosstab(y_test_augmented, y_test_pred) # [1][1]
+```
+
+
+
+### XGBOD : Semi-supervisé : 
+
+XGBOD est un modèle dit semi-supervisé, adapté de XGBoost, permettant de détecter des outliers en les définissant à l'avance.
+
+```{python}
+from pyod.models.xgbod import XGBOD
+
+# Préparation des données
+X = pd.get_dummies(observations[to_keep])
+y = observations['sup_20']
+esca = observations['pourcentage_esca']
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test, esca_train, esca_test = train_test_split(X, y, esca, test_size=0.2)
+
+
+# Initialisation du modèle XGBOD
+clf = XGBOD()
+clf.set_params(learning_rate=0.1, n_estimators=500, max_depth=12)
+
+# Entraînement du modèle
+clf.fit(X_train, y_train)
+y_train_pred = clf.predict(X_train)
+y_test_pred = clf.predict(X_test)
+```
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+pd.crosstab(y_test, y_test_pred) # [1][1]
+```
+```{python}
+train, test = train_test_split(observations, test_size=0.2, stratify = observations.sup_20)
+
+idx_train = np.random.choice(train.loc[train.pourcentage_esca >= 20].index, size=4000, replace=True, p=None)
+train_augmented = pd.concat([train, train.loc[idx_train]])
+y_train_augmented = train_augmented['sup_20']
+X_train_augmented = pd.get_dummies(train_augmented[to_keep])
+
+y_test_augmented = test['sup_20']
+X_test_augmented = pd.get_dummies(test[to_keep])
+
+# Initialisation du modèle XGBOD
+clf = XGBOD()
+clf.set_params(learning_rate=0.1, n_estimators=500, max_depth=12)
+clf.fit(X_train_augmented, y_train_augmented)
+y_test_pred = clf.predict(X_test_augmented)
+pd.crosstab(y_test_augmented, y_test_pred) # [1][1]
+```
+
+### SVM :
+
+Classification binaire supervisée par Support Machine Vectors :
+
+```{python}
+from sklearn.svm import SVC
+svm = SVC(
+    kernel='rbf',          # ou ‘rbf’, 'linear', 'poly', ‘sigmoid’
+    gamma='scale', # {‘scale’, ‘auto’}
+    # class_weight='balanced',  # important pour gérer le déséquilibre
+    degree=5, # degré du polynome si kernel='poly' (défaut=3)
+    C=1, # paramètre de régularisation (pénalité) (défaut=1)
+    probability=True      # nécessaire pour ROC et AUC
+)
+
+svm.fit(X_train, y_train)
+y_train_pred = svm.predict(X_train)
+y_test_pred = svm.predict(X_test)
+```
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+
+pd.crosstab(y_test, y_test_pred) # [1][1]
+```
+
+### Random forest :
+
+Classification binaire supervisée par Forêt Aléatoire:
+
+```{python}
+from sklearn.ensemble import RandomForestClassifier
+rf = RandomForestClassifier(
+    n_estimators=100,
+    class_weight='balanced',  # pour gérer les classes déséquilibrées
+    n_jobs=-1
+)
+
+rf.fit(X_train, y_train)
+y_train_pred = rf.predict(X_train)
+y_test_pred = rf.predict(X_test)
+```
+
+### KNN :
+
+Classification binaire supervisée par k-plus proches voisins :
+
+```{python}
+from sklearn.preprocessing import StandardScaler
+# Préparation des données
+X = pd.get_dummies(observations[to_keep])
+X = pd.get_dummies(observations[list["cepage", "region_viticole", "age_parcelle_estime"]])
+y = observations['sup_20']
+esca = observations['pourcentage_esca']
+
+scaler = StandardScaler()
+# var_cont = list(set(to_keep) - set(["cepage", "region_viticole"]))
+# X_test[var_cont] = scaler.fit_transform(X_test[var_cont])
+# X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+
+X_test[["age_parcelle_estime"]] = scaler.fit_transform(X_test[["age_parcelle_estime"]])
+X_train[["age_parcelle_estime"]] = scaler.fit_transform(X_train[["age_parcelle_estime"]])
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test, esca_train, esca_test = train_test_split(X, y, esca, test_size=0.2)
+
+from sklearn.neighbors import KNeighborsClassifier
+neigh = KNeighborsClassifier(n_neighbors=100)
+neigh.fit(X_train, y_train)
+y_train_pred = neigh.predict(X_train)
+y_test_pred = neigh.predict(X_test)
+### Les >= 20 ne sont pas voisins entre eux.
+```
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+
+pd.crosstab(y_test, y_test_pred) # [1][1]
+```
+
+```{python}
+print("Individus mal classifiés train :")
+print(esca_train.loc[y_train != y_train_pred])
+print("Individus mal classifiés test :")
+print(esca_test.loc[y_test != y_test_pred])
+```
+
+Les invidus mal classifiés ne sont pas tous proche de 20 !
+
+### Analyses discriminantes :
+
+Classification binaire supervisée par analyses discriminantes linéaire (lda) et quadratic (qda) :
+
+```{python}
+X = pd.get_dummies(observations[to_keep])
+y = observations['sup_20']
+esca = observations['pourcentage_esca']
+
+# scaler = StandardScaler()
+# var_cont = list(set(to_keep) - set(["cepage", "region_viticole"]))
+# X_test[var_cont] = scaler.fit_transform(X_test[var_cont])
+# X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test, esca_train, esca_test = train_test_split(X, y, esca, test_size=0.2)
+
+
+# train, test = train_test_split(observations, test_size=0.2, stratify = observations.sup_20)
+# 
+# idx_train = np.random.choice(train.loc[train.pourcentage_esca >= 20].index, size=4000, replace=True, p=None)
+# train_augmented = pd.concat([train, train.loc[idx_train]])
+# y_train = train_augmented['sup_20']
+# X_train = pd.get_dummies(train_augmented[to_keep])
+# esca_train = train_augmented['pourcentage_esca']
+# 
+# idx_test = np.random.choice(test.loc[test.pourcentage_esca >= 20].index, size=1000, replace=True, p=None)
+# test_augmented = pd.concat([test, test.loc[idx_test]])
+# y_test = test_augmented['sup_20']
+# X_test = pd.get_dummies(test_augmented[to_keep])
+# esca_test = test_augmented['pourcentage_esca']
+```
+
+
+```{python}
+# from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+# clf = LinearDiscriminantAnalysis(solver="lsqr") # solver{‘svd’, ‘lsqr’, ‘eigen’}
+# # 1:1 test : svd = 701 = lsqr, eigen = marhce pas
+# clf.fit(X_train, y_train)
+
+from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
+clf = QuadraticDiscriminantAnalysis(reg_param=1e-9) # 'reg_param': [0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.7, 0.9, 1]
+clf.fit(X_train, y_train)
+
+y_train_pred = clf.predict(X_train)
+y_test_pred = clf.predict(X_test)
+# 1:1 test : regparam: 0 = 1009; 0.01 = 440, 0.05 = 533, 0.1 = 561, 0.25 = 561, 0.5 = 429, 0.7 = 429, 0.9 = 395, 1 = 407
+# 1e-10 = 777
+# 1e-12 = 829
+# 1e-15 = 948
+# 1e-9 = 736 = 73% d'accuracy
+# Le rééchantillonage ne change pas grand chose
+```
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+
+pd.crosstab(y_test, y_test_pred) # [1][1]
+```
+
+Pas si mal qda
+
+```{python}
+print("Individus mal classifiés train :")
+print(esca_train.loc[y_train != y_train_pred])
+print("Individus mal classifiés test :")
+print(esca_test.loc[y_test != y_test_pred])
+```
+
+
+
+```{python}
+train, test = train_test_split(observations, test_size=0.2, stratify = observations.sup_20)
+
+idx_train = np.random.choice(train.loc[train.pourcentage_esca >= 20].index, size=4000, replace=True, p=None)
+train_augmented = pd.concat([train, train.loc[idx_train]])
+y_train_augmented = train_augmented['sup_20']
+X_train_augmented = pd.get_dummies(train_augmented[to_keep])
+
+idx_test = np.random.choice(test.loc[test.pourcentage_esca >= 20].index, size=1000, replace=True, p=None)
+test_augmented = pd.concat([test, test.loc[idx_test]])
+y_test_augmented = test_augmented['sup_20']
+X_test_augmented = pd.get_dummies(test_augmented[to_keep])
+
+
+clf = QuadraticDiscriminantAnalysis(reg_param=1e-9) # 'reg_param': [0, 0.01, 0.05, 0.1, 0.25, 0.5, 0.7, 0.9, 1]
+clf.fit(X_train_augmented, y_train_augmented)
+
+
+y_test_pred = clf.predict(X_test_augmented)
+pd.crosstab(y_test_augmented, y_test_pred) # [1][1]
+```
+
+
+### Réseau de neurones :
+
+Classification binaire supervisée en créant des réseaux de neurones sans définir directement l'architecture :
+
+```{python}
+from sklearn.utils.class_weight import compute_class_weight
+# X = pd.get_dummies(observations[to_keep])
+# y = observations['sup_20']
+# esca = observations['pourcentage_esca']
+# 
+# # Division des données en ensemble d'apprentissage et de test
+# X_train, X_test, y_train, y_test, esca_train, esca_test = train_test_split(X, y, esca, test_size=0.2)
+
+
+train, test = train_test_split(observations, test_size=0.2, stratify = observations.sup_20)
+
+idx_train = np.random.choice(train.loc[train.pourcentage_esca >= 20].index, size=4000, replace=True, p=None)
+train_augmented = pd.concat([train, train.loc[idx_train]])
+y_train = train_augmented['sup_20']
+X_train = pd.get_dummies(train_augmented[to_keep])
+esca_train = train_augmented['pourcentage_esca']
+
+# idx_test = np.random.choice(test.loc[test.pourcentage_esca >= 20].index, size=1000, replace=True, p=None)
+# test_augmented = pd.concat([test, test.loc[idx_test]])
+y_test = test['sup_20']
+X_test = pd.get_dummies(test[to_keep])
+esca_test = test['pourcentage_esca']
+
+
+# from sklearn.decomposition import PCA
+# pca = PCA(n_components=20)  # n_components= 10 ou  12 ou 20, à tester
+# X_train = pca.fit_transform(X_train)
+# np.sum(pca.explained_variance_ratio_)
+# 
+# X_test = pca.transform(X_test)
+
+
+# Calcul des poids de classe
+class_weights = compute_class_weight(class_weight="balanced", classes=np.unique(y), y=y_train)
+class_weight_dict = {i: w for i, w in enumerate(class_weights)}
+print("Poids de classe :", class_weight_dict)
+```
+
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    'max_iter': [50, 100, 200, 500],
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate_init': [0.0001, 0.001, 0.01, 0.05, 0.1],
+    'alpha': [0.0001, 0.001, 0.01, 0.1, 0.5, 1],
+    'hidden_layer_sizes' : [(10,), (64,), (100,)],
+    'activation' : ['identity', 'logistic', 'tanh', 'relu']
+}
+
+# Création de l'objet GridSearch
+model = NNC = MLPClassifier()
+grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=1, verbose=0)
+
+# Entraînement du modèle avec GridSearch
+grid_search.fit(X_train, y_train)
+
+# Affichage des meilleurs paramètres
+print("Best parameters found: ", grid_search.best_params_)
+# Best parameters found:  {'activation': 'tanh', 'hidden_layer_sizes': (100,), 'learning_rate_init': 0.0001, 'max_iter': 500}
+```
+
+```{python}
+from sklearn.neural_network import MLPClassifier
+NNC = MLPClassifier(random_state=1, max_iter=10000, learning_rate_init=0.01, alpha=0.001, hidden_layer_sizes=(100,), activation='relu', early_stopping=True, n_iter_no_change=10, tol=1e-4).fit(X_train, y_train) # 
+# alpha = Regularisation
+# activation = ‘identity’, ‘logistic’, ‘tanh’, ‘relu’
+# clf.predict_proba(X_test[:1])
+
+y_proba = NNC.predict(X_test).ravel()
+y_test_pred = (y_proba > 0.1).astype(int)
+y_proba = NNC.predict(X_train).ravel()
+y_train_pred = (y_proba > 0.1).astype(int)
+# y_train_pred = NNC.predict(X_train)
+# y_test_pred = NNC.predict(X_test)
+```
+
+Classification binaire supervisée en créant des réseaux de neurones en définissant directement l'architecture :
+
+```{python}
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout#, Linear
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+
+# Modèle de base
+NN = Sequential([
+    Dense(64, activation='relu', input_shape=(X_train.shape[1],)), # activation='tanh', 'relu'
+    Dense(64, activation='relu'),
+    Dense(64, activation='relu'),
+    Dense(64, activation='relu'),
+    Dense(64, activation='relu'),
+    Dense(32, activation='relu'),
+    Dense(1, activation='sigmoid')  # binaire
+])
+
+# Compilation
+NN.compile(optimizer=Adam(learning_rate=0.001),
+              loss='binary_crossentropy',
+              metrics=['Precision', 'Recall', 'AUC'])
+
+# Early stopping
+early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+
+# Entraînement avec pondération
+history = NN.fit(X_train, y_train,
+                    validation_split=0.2,
+                    epochs=50,
+                    batch_size=64,
+                    class_weight=class_weight_dict,
+                    callbacks=[early_stop],
+                    verbose=1)
+                    
+y_proba = NN.predict(X_train).ravel()
+y_train_pred = (y_proba > 0.4).astype(int)
+
+y_proba = NN.predict(X_test).ravel()
+y_test_pred = (y_proba > 0.4).astype(int)
+```
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+pd.crosstab(y_test, y_test_pred) # [1][1]
+```
+
+```{python}
+# print("Individus mal classifiés train :")
+# print(esca_train.loc[y_train != y_train_pred])
+# print("Individus mal classifiés test :")
+# print(esca_test.loc[y_test != y_test_pred])
+
+print("Faux positifs train :")
+print(esca_train.loc[y_train < y_train_pred])
+print("Faux positifs test :")
+print(esca_test.loc[y_test < y_test_pred])
+```
+
+
+### Processus gaussien :
+
+Classification binaire supervisée par processus gaussien :
+
+```{python}
+to_keep = list(["cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+to_use = list(["cepage", "region_viticole", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.dormance", "swi.dormance", "auc_isv.symptomes", "tv.deb_end"])
+
+# Division des données en ensemble d'apprentissage et de test
+train, test = train_test_split(observations, test_size=0.2, stratify = observations.sup_20)
+
+idx_train = np.random.choice(train.loc[train.pourcentage_esca >= 20].index, size=4000, replace=True, p=None)
+train_augmented = pd.concat([train, train.loc[idx_train]])
+y_train = train_augmented['sup_20']
+X_train = pd.get_dummies(train_augmented[to_use])
+esca_test = train_augmented['pourcentage_esca']
+
+idx_test = np.random.choice(test.loc[test.pourcentage_esca >= 20].index, size=1000, replace=True, p=None)
+test_augmented = test # pd.concat([test, test.loc[idx_test]])
+y_test = test_augmented['sup_20']
+X_test = pd.get_dummies(test_augmented[to_use])
+esca_test = test_augmented['pourcentage_esca']
+
+
+scaler = StandardScaler()
+var_cont = list(set(to_use) - set(["cepage", "region_viticole"]))
+X_test[var_cont] = scaler.fit_transform(X_test[var_cont])
+X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+
+# Réduction de la dimension par ACP, car les pg marche mal avec plus de ~12 variables :
+from sklearn.decomposition import PCA
+pca = PCA(n_components=12)  # ou 12 ou 20, à tester
+pca = pca.fit(X_train)
+X_train = pca.transform(X_train)
+X_test = pca.transform(X_test)
+np.sum(pca.explained_variance_ratio_)
+```
+
+```{python}
+from sklearn.gaussian_process import GaussianProcessClassifier
+from sklearn.gaussian_process.kernels import *
+
+# Division des données en ensemble d'apprentissage et de test
+#X_train, X_test, y_train, y_test, esca_train, esca_test = train_test_split(X, y, esca, test_size=0.2)
+
+gp_classifieur = GaussianProcessClassifier(kernel=RationalQuadratic(), random_state=0,  n_restarts_optimizer=0)
+# RationalQuadratic() : 28 erreurs
+# Matern : test : 76 erreurs
+# RBF = pas fou
+# DotProduct() + WhiteKernel() = Horrible
+gp_classifieur.fit(X_train, y_train)
+y_train_pred = gp_classifieur.predict(X_train)
+y_test_pred = gp_classifieur.predict(X_test)
+```
+
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+
+pd.crosstab(y_test, y_test_pred) # [1][1]
+```
+
+
+
+```{python}
+print("Train :")
+print(esca_train.loc[y_train != y_train_pred])
+print("Test :")
+print(esca_test.loc[y_test != y_test_pred])
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

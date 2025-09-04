@@ -1,0 +1,462 @@
+---
+title: "xgboost"
+author: "Gabriel Macé"
+date: "2025-05-21"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+
+```{r}
+library(xgboost)
+library(caret) # cross validation
+library(dplyr)
+library(ggplot2)
+library(Metrics)
+source("../../R_functions/shap.R")
+
+load("../../data/modelisation/observations.RData")
+```
+
+```{r}
+# RU to catégorielle ordinale
+# observations$RU <- as.integer(factor(observations$RU))
+observations$cepage <- as.factor(observations$cepage)
+observations$region_viticole <- as.factor(observations$region_viticole)
+```
+
+
+```{r}
+# Avec sélection de variable :
+# récupération des variables par type de période :
+var_an_pheno <- colnames(observations)[11:47]
+var_an <- colnames(observations)[48:84]
+var_dormance <- colnames(observations)[85:121]
+var_deb_to_flo <- setdiff(colnames(observations)[122:158] , c("sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes <- setdiff(colnames(observations)[159:195], "sum.frost.days.0.symptomes") # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end <- colnames(observations)[196:232]
+var_tt <- c("RU", "debourrement", "floraison", "cepage", "age_parcelle_estime", "region_viticole", var_an_pheno, var_an, var_dormance, var_deb_to_flo, var_symptomes, var_deb_to_end)
+```
+
+### Année phénologique :
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+
+enlever <- c("bh0", "bh", "tn", "tx", "rr", "et0", "sum.heat.days.25", "sum.heat.days.30", "hu", "isv", "longueur_periode",
+             "isv.faible.seq.5", "isv.faible.seq.10", "isv.faible.seq.15",
+             "isv.fai_mod.seq.5", "isv.fai_mod.seq.10", "isv.fai_mod.seq.15",
+             "isv.mod_sev.seq.5", "isv.mod_sev.seq.10", "isv.mod_sev.seq.15",
+             "isv.sev.seq.5", "isv.sev.seq.10", "isv.sev.seq.15", "auc_isv") # sum.days.isv.sev"
+
+to_use <- setdiff(c(var_an_pheno,"RU", "debourrement", "floraison", "cepage", "age_parcelle_estime", "region_viticole"), enlever) 
+
+features <- observations[ ,to_use]
+features <- Matrix::sparse.model.matrix(~ cepage + region_viticole + . - 1, data = features, sep = "_")
+
+
+model_xgb = xgboost(data = as.matrix(features[i_train,]), nround = 80, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[i_train, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+plot(model_xgb$evaluation_log$train_poisson_nloglik, type = "l")
+
+rmse(observations$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train, ])))
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_xgb, as.matrix(features[i_train,]))))
+
+rmse(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))))
+
+```
+
+```{r}
+shap = shap.score.rank(xgb_model = model_xgb, 
+                                   X_train = as.matrix(features),
+                                   shap_approx = F)
+var_importance(shap, top_n=10)
+
+## Prepare data for top N variables
+shap_long = shap.prep(shap = shap,
+                           X_train = as.matrix(features) , 
+                           top_n = 10)
+
+## Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+
+xgb.plot.shap(data = features, # input data
+              model = model_xgb, # xgboost model
+              features = names(shap$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+)
+```
+
+### Année calendaire :
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+
+to_use2 <- setdiff(c(var_an,"debourrement", "floraison", "cepage", "age_parcelle_estime", "region_viticole"), paste0(enlever, ".an"))
+
+features <- observations[ ,to_use2]
+features <- Matrix::sparse.model.matrix(~ cepage + region_viticole + . - 1, data = features, sep = "_")
+
+
+model_xgb = xgboost(data = as.matrix(features[i_train,]), nround = 80, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[i_train, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+plot(model_xgb$evaluation_log$train_poisson_nloglik, type = "l")
+
+rmse(observations$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train, ])))
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_xgb, as.matrix(features[i_train,]))))
+
+rmse(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))))
+```
+
+```{r}
+shap = shap.score.rank(xgb_model = model_xgb, 
+                                   X_train = as.matrix(features),
+                                   shap_approx = F)
+var_importance(shap, top_n=10)
+
+## Prepare data for top N variables
+shap_long = shap.prep(shap = shap,
+                           X_train = as.matrix(features) , 
+                           top_n = 10)
+
+## Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+
+xgb.plot.shap(data = features, # input data
+              model = model_xgb, # xgboost model
+              features = names(shap$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+)
+```
+
+### Dormance :
+
+```{r}
+enlever <- c("bh0", "bh", "tn", "tx", "rr", "et0", "sum.heat.days.25", "sum.heat.days.30", "hu", "isv", # "longueur_periode",
+             "isv.faible.seq.5", "isv.faible.seq.10", "isv.faible.seq.15",
+             "isv.fai_mod.seq.5", "isv.fai_mod.seq.10", "isv.fai_mod.seq.15",
+             "isv.mod_sev.seq.5", "isv.mod_sev.seq.10", "isv.mod_sev.seq.15",
+             "isv.sev.seq.5", "isv.sev.seq.10", "isv.sev.seq.15", "auc_isv") # sum.days.isv.sev"
+
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+
+to_use2 <- setdiff(c(var_dormance,"debourrement", "floraison", "cepage", "age_parcelle_estime", "region_viticole"), paste0(enlever, ".dormance"))
+
+features <- observations[ ,to_use2]
+features <- Matrix::sparse.model.matrix(~ cepage + region_viticole + . - 1, data = features, sep = "_")
+
+
+model_xgb = xgboost(data = as.matrix(features[i_train,]), nround = 80, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[i_train, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+plot(model_xgb$evaluation_log$train_poisson_nloglik, type = "l")
+
+rmse(observations$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train, ])))
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_xgb, as.matrix(features[i_train,]))))
+
+rmse(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))))
+```
+
+```{r}
+shap = shap.score.rank(xgb_model = model_xgb, 
+                                   X_train = as.matrix(features),
+                                   shap_approx = F)
+var_importance(shap, top_n=10)
+
+## Prepare data for top N variables
+shap_long = shap.prep(shap = shap,
+                           X_train = as.matrix(features) , 
+                           top_n = 10)
+
+## Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+
+xgb.plot.shap(data = features, # input data
+              model = model_xgb, # xgboost model
+              features = names(shap$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+)
+```
+
+### Débourrement à floraison :
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+
+# to_use2 <- setdiff(c(var_deb_to_flo,"debourrement", "floraison", "cepage", "age_parcelle_estime", "region_viticole"), paste0(enlever, ".deb_flo"))
+
+to_use2 <- c(var_deb_to_flo,"debourrement", "floraison", "cepage", "age_parcelle_estime", "region_viticole")
+
+features <- observations[ ,to_use2]
+features <- Matrix::sparse.model.matrix(~ cepage + region_viticole + . - 1, data = features, sep = "_")
+
+
+model_xgb = xgboost(data = as.matrix(features[i_train,]), nround = 80, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[i_train, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+plot(model_xgb$evaluation_log$train_poisson_nloglik, type = "l")
+
+rmse(observations$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train, ])))
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_xgb, as.matrix(features[i_train,]))))
+
+rmse(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))))
+```
+
+```{r}
+shap = shap.score.rank(xgb_model = model_xgb, 
+                                   X_train = as.matrix(features),
+                                   shap_approx = F)
+var_importance(shap, top_n=10)
+
+## Prepare data for top N variables
+shap_long = shap.prep(shap = shap,
+                           X_train = as.matrix(features) , 
+                           top_n = 10)
+
+## Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+
+xgb.plot.shap(data = features, # input data
+              model = model_xgb, # xgboost model
+              features = names(shap$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+)
+```
+
+### Période d'observations des symptomes :
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+
+to_use2 <- setdiff(c(var_symptomes,"debourrement", "floraison", "cepage", "age_parcelle_estime", "region_viticole"), paste0(enlever, ".symptomes"))
+
+features <- observations[ ,to_use2]
+features <- Matrix::sparse.model.matrix(~ cepage + region_viticole + . - 1, data = features, sep = "_")
+
+
+model_xgb = xgboost(data = as.matrix(features[i_train,]), nround = 80, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[i_train, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+plot(model_xgb$evaluation_log$train_poisson_nloglik, type = "l")
+
+rmse(observations$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train, ])))
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_xgb, as.matrix(features[i_train,]))))
+
+rmse(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))))
+```
+
+```{r}
+shap = shap.score.rank(xgb_model = model_xgb, 
+                                   X_train = as.matrix(features),
+                                   shap_approx = F)
+var_importance(shap, top_n=10)
+
+## Prepare data for top N variables
+shap_long = shap.prep(shap = shap,
+                           X_train = as.matrix(features) , 
+                           top_n = 10)
+
+## Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+
+xgb.plot.shap(data = features, # input data
+              model = model_xgb, # xgboost model
+              features = names(shap$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+)
+```
+
+### Débourrement au 31/08 :
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+
+to_use2 <- setdiff(c(var_deb_to_end,"debourrement", "floraison", "cepage", "age_parcelle_estime", "region_viticole"), paste0(enlever, ".deb_end"))
+
+features <- observations[ ,to_use2]
+features <- Matrix::sparse.model.matrix(~ cepage + region_viticole + . - 1, data = features, sep = "_")
+
+
+model_xgb = xgboost(data = as.matrix(features[i_train,]), nround = 80, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[i_train, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+plot(model_xgb$evaluation_log$train_poisson_nloglik, type = "l")
+
+rmse(observations$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train, ])))
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_xgb, as.matrix(features[i_train,]))))
+
+rmse(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))))
+```
+
+```{r}
+shap = shap.score.rank(xgb_model = model_xgb, 
+                                   X_train = as.matrix(features),
+                                   shap_approx = F)
+var_importance(shap, top_n=10)
+
+## Prepare data for top N variables
+shap_long = shap.prep(shap = shap,
+                           X_train = as.matrix(features) , 
+                           top_n = 10)
+
+## Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+
+xgb.plot.shap(data = features, # input data
+              model = model_xgb, # xgboost model
+              features = names(shap$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+)
+```
+
+### Total :
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = 3500)
+
+to_use2 <- setdiff(var_tt, c("region_viticole",paste0(enlever, ".an"), paste0(enlever,".dormance"), paste0(enlever,".deb_flo"), paste0(enlever,".symptomes"), paste0(enlever,".deb_end")))
+
+features <- observations[ ,to_use2]
+features <- Matrix::sparse.model.matrix(~ cepage + . - 1, data = features, sep = "_") #  + region_viticole
+
+
+model_xgb = xgboost(data = as.matrix(features[i_train,]), nround = 80, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[i_train, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+plot(model_xgb$evaluation_log$train_poisson_nloglik, type = "l")
+
+rmse(observations$pourcentage_esca[i_train], predict(model_xgb, as.matrix(features[i_train, ])))
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_xgb, as.matrix(features[i_train,]))))
+
+rmse(observations$pourcentage_esca[-i_train], predict(model_xgb, as.matrix(features[-i_train,])))
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_xgb, as.matrix(features[-i_train,]))))
+```
+
+```{r}
+model_xgb = xgboost(data = as.matrix(features), nround = 80, 
+                    objective= "count:poisson", # "reg:squarederror" 
+                    label= observations[, "pourcentage_esca"],
+                    eta = 0.1,
+                    max_depth = 6,
+                    verbose = FALSE)  
+
+shap = shap.score.rank(xgb_model = model_xgb, 
+                                   X_train = as.matrix(features),
+                                   shap_approx = F)
+var_importance(shap, top_n=10)
+
+## Prepare data for top N variables
+shap_long = shap.prep(shap = shap,
+                           X_train = as.matrix(features) , 
+                           top_n = 10)
+
+## Plot shap overall metrics
+plot.shap.summary(data_long = shap_long)
+
+xgb.plot.shap(data = as.matrix(features), # input data
+              model = model_xgb, # xgboost model
+              features = names(shap$mean_shap_score[1:10]), # only top 10 var
+              n_col = 3, # layout option
+              plot_loess = T # add red line to plot
+)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+

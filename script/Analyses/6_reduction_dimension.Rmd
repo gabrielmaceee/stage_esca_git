@@ -1,0 +1,412 @@
+---
+title: "Réduction de dimension"
+author: "Gabriel Macé"
+date: "2025-04-28"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+Le but de ce script est d'essayer de repérer les éventuelles structures dans notre jeu de données, qu'elles soient linéaires ou non. Et essayer de trouver les liens entre ces structures et l'incidence d'esca.
+
+```{r, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(stats)
+library(factoextra) # ACP
+library(FactoMineR) # ACP
+library(corrplot)
+load("../../data/modelisation/observations.RData")
+```
+
+```{r}
+# récupération des variables par type de période :
+var_an_pheno <- colnames(observations)[11:47]
+var_an <- colnames(observations)[48:84]
+var_dormance <- colnames(observations)[85:121]
+var_deb_to_flo <- setdiff(colnames(observations)[122:158] , c("sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes <- setdiff(colnames(observations)[159:195], "sum.frost.days.0.symptomes") # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end <- colnames(observations)[196:232]
+var_tt <- c("RU", "debourrement", "floraison", var_an_pheno, var_an, var_dormance, var_deb_to_flo, var_symptomes, var_deb_to_end)
+```
+
+Nous allons procéder à une série de réduction de dimension sur nos variables, en faisant varier les variables sélectionnées et la méthode utilisée, afin d'avoir une idée des variables qui varient ensemble, et des variables importantes.
+
+## ACP :
+
+### Année phénologique avec sélections de variables :
+
+Cette première réduction de dimension se fait sur les variables météorologiques, et uniquement celles par années phénologiques (septembre à septembre).
+
+Nous enlevons celles trop corrélées.
+
+```{r}
+enlever <- c("bh0", "bh", "tn", "tx", "rr", "et0", "sum.heat.days.25", "sum.heat.days.30", "hu", "ftsw", "longueur_periode",
+"isv.faible.seq.5", "isv.faible.seq.10", "isv.faible.seq.15",
+"isv.fai_mod.seq.5", "isv.fai_mod.seq.10", "isv.fai_mod.seq.15",
+"isv.mod_sev.seq.5", "isv.mod_sev.seq.10", "isv.mod_sev.seq.15",
+"isv.sev.seq.5", "isv.sev.seq.10", "isv.sev.seq.15", "auc_isv") # sum.days.isv.sev"
+# Enlever les phéno et garder que tm ?
+to_use <- setdiff(c(var_an_pheno,"debourrement", "floraison", "annee", "cepage", "age_parcelle_estime", "pourcentage_esca", "region_viticole"), enlever) 
+
+res.pca <- PCA(observations[,to_use], quanti.sup = c("age_parcelle_estime", "pourcentage_esca"),quali.sup = c("annee", "cepage", "region_viticole"), ncp = 10, graph = FALSE)
+```
+
+#### Contribution et répresentation des variables :
+
+Pourcentage de variance expliqué par les différentes dimensions :
+
+```{r}
+eig.val <- get_eigenvalue(res.pca)
+head(eig.val, n = 10)
+fviz_screeplot(res.pca)
+```
+
+```{r}
+fviz_pca_var(res.pca, col.var = "coord", gradient.cols = c("blue", "red"), repel = TRUE)
+```
+
+
+```{r}
+var = get_pca_var(res.pca)
+corrplot(var$contrib[,1:10], is.corr = FALSE, title = "Contribution", mar=c(0,0,1,0)) # Contribution 
+corrplot(var$cos2[,1:10], is.corr = FALSE, , title = "Représentation", mar=c(0,0,1,0)) # qualité de représentation
+fviz_contrib(res.pca, choice = "var", axes = c(1:2))
+fviz_cos2(res.pca, choice = "var", axes = c(1:2))
+```
+
+#### Clustering sur les variables
+```{r}
+hc <- hclust(dist(abs(res.pca$var$coord)), method = "ward.D")
+plot(hc)
+rect.hclust(hc,k=3)
+```
+
+
+```{r}
+# Créez une variable de regroupement en utilisant kmeans
+set.seed(3)
+res.km <- kmeans(abs(res.pca$var$coord), centers = 4, nstart = 25)# Créez 2 groupes de variables (centers = 2)
+grp <- as.factor(res.km$cluster)
+# Colorer les variables par groupes
+fviz_pca_var(res.pca, col.var = grp, palette =  c("seagreen","coral3", "mediumslateblue", "yellow", "magenta"), legend.title = "Cluster",addEllipses = FALSE, repel = TRUE)
+fviz_pca_var(res.pca, col.var = grp, palette =  c("seagreen","coral3", "mediumslateblue", "yellow", "magenta"), legend.title = "Cluster",addEllipses = FALSE, axes = c(1,3), repel = TRUE)
+fviz_pca_var(res.pca, col.var = grp, palette =  c("seagreen","coral3", "mediumslateblue", "yellow", "magenta"), legend.title = "Cluster",addEllipses = FALSE, axes = c(2,3), repel = TRUE)
+```
+
+
+Il semble y avoir 4 groupes de variables qui varient ensemble : 
+
+- 1 : tm, bhv, tv, sum.days.isv.sev, sum.frost.days.0, debourrement, floraison -> dimensions 1 et 2
+
+- 2 : VPD, rain.days, isv : dimension 1
+
+- 3 : sum.heat.days.35 -> dimension 5
+
+- 4 : swi, sum.days.isv.faible, sum.days.isv.fai_mod, sum.days.isv.mod_sev  -> reparties sur les 3/4 premières dimensions
+
+
+#### Individus :
+
+```{r}
+fviz_pca_ind(res.pca, habillage = "region_viticole", geom.ind = "point")
+```
+
+La région viticole semble quelque peu "resumer" les autres variables.
+
+
+```{r}
+# fviz_pca_ind(res.pca, col.ind = log1p(observations$pourcentage_esca), gradient.cols = c("blue", "yellow", "red"), geom.ind = "point")
+
+fviz_pca_ind(res.pca, col.ind = observations$pourcentage_esca, geom.ind = "point") +
+  scale_color_gradientn(colors = c("blue", "yellow", "red"), 
+                        limits = c(0, quantile(observations$pourcentage_esca, 0.95))) +
+  labs(col = "Incidence esca")
+```
+
+Les variables météo ne semblent pas liées à l'incidence d'esca.
+
+### Comparaison des périodes
+
+Nous effectuons la même réduction de dimension mais sur les différentes périodes.
+
+```{r}
+print("Années calendaires :")
+to_use2 <- setdiff(c(var_an,"debourrement", "floraison", "annee", "cepage", "age_parcelle_estime", "pourcentage_esca", "region_viticole"), paste0(enlever, ".an"))
+res.pca2 <- PCA(observations[,to_use2], quanti.sup = c("age_parcelle_estime", "pourcentage_esca"),quali.sup = c("annee", "cepage", "region_viticole"), ncp = 10, graph = FALSE)
+set.seed(3)
+res.km.2 <- kmeans(abs(res.pca2$var$coord), centers = 4, nstart = 25)# Créez 2 groupes de variables (centers = 2)
+grp.2 <- as.factor(res.km.2$cluster)
+# Colorer les variables par groupes
+plot(fviz_pca_var(res.pca2, col.var = grp.2, palette =  c("seagreen","coral3", "mediumslateblue", "yellow", "magenta"), legend.title = "Cluster",addEllipses = FALSE), repel = TRUE)
+fviz_pca_ind(res.pca2, habillage = "region_viticole", geom.ind = "point") +
+  labs(title = "Année calendaire" ,col = "Région viticole")
+fviz_pca_ind(res.pca2, col.ind = observations$pourcentage_esca, geom.ind = "point") +
+  scale_color_gradientn(colors = c("blue", "yellow", "red"), 
+                        limits = c(0, quantile(observations$pourcentage_esca, 0.95))) +
+  labs(title = "Année calendaire" ,col = "Incidence esca")
+
+print("Dormance :")
+to_use2 <- setdiff(c(var_dormance,"debourrement", "floraison", "annee", "cepage", "age_parcelle_estime", "pourcentage_esca", "region_viticole"), paste0(enlever, ".dormance"))
+res.pca2 <- PCA(observations[,to_use2], quanti.sup = c("age_parcelle_estime", "pourcentage_esca"),quali.sup = c("annee", "cepage", "region_viticole"), ncp = 10, graph = FALSE)
+set.seed(3)
+res.km.2 <- kmeans(abs(res.pca2$var$coord), centers = 4, nstart = 25)# Créez 2 groupes de variables (centers = 2)
+grp.2 <- as.factor(res.km.2$cluster)
+# Colorer les variables par groupes
+plot(fviz_pca_var(res.pca2, col.var = grp.2, palette =  c("seagreen","coral3", "mediumslateblue", "yellow", "magenta"), legend.title = "Cluster",addEllipses = FALSE), repel = TRUE)
+fviz_pca_ind(res.pca2, habillage = "region_viticole", geom.ind = "point") +
+  labs(title = "Dormance" ,col = "Région viticole")
+fviz_pca_ind(res.pca2, col.ind = observations$pourcentage_esca, geom.ind = "point") +
+  scale_color_gradientn(colors = c("blue", "yellow", "red"), 
+                        limits = c(0, quantile(observations$pourcentage_esca, 0.95))) +
+  labs(title = "Dormance", col = "Incidence esca")
+
+
+print("Débourrement à floraison :")
+to_use2 <- setdiff(c(var_deb_to_flo,"debourrement", "floraison", "annee", "cepage", "age_parcelle_estime", "pourcentage_esca", "region_viticole"), paste0(enlever, ".deb_flo"))
+res.pca2 <- PCA(observations[,to_use2], quanti.sup = c("age_parcelle_estime", "pourcentage_esca"),quali.sup = c("annee", "cepage", "region_viticole"), ncp = 10, graph = FALSE)
+set.seed(3)
+res.km.2 <- kmeans(abs(res.pca2$var$coord), centers = 4, nstart = 25)# Créez 2 groupes de variables (centers = 2)
+grp.2 <- as.factor(res.km.2$cluster)
+# Colorer les variables par groupes
+plot(fviz_pca_var(res.pca2, col.var = grp.2, palette =  c("seagreen","coral3", "mediumslateblue", "yellow", "magenta"), legend.title = "Cluster",addEllipses = FALSE), repel = TRUE)
+fviz_pca_ind(res.pca2, habillage = "region_viticole", geom.ind = "point") +
+  labs(title = "Débourrement à floraison", col = "Région viticole")
+fviz_pca_ind(res.pca2, col.ind = observations$pourcentage_esca, geom.ind = "point") +
+  scale_color_gradientn(colors = c("blue", "yellow", "red"), 
+                        limits = c(0, quantile(observations$pourcentage_esca, 0.95))) +
+  labs(title = "Debourrement à floraison", col = "Incidence esca")
+
+
+print("Périodes d'observations des symptômes :")
+to_use2 <- setdiff(c(var_symptomes,"debourrement", "floraison", "annee", "cepage", "age_parcelle_estime", "pourcentage_esca", "region_viticole"), paste0(enlever, ".symptomes"))
+res.pca2 <- PCA(observations[,to_use2], quanti.sup = c("age_parcelle_estime", "pourcentage_esca"),quali.sup = c("annee", "cepage", "region_viticole"), ncp = 10, graph = FALSE)
+set.seed(3)
+res.km.2 <- kmeans(abs(res.pca2$var$coord), centers = 4, nstart = 25)# Créez 2 groupes de variables (centers = 2)
+grp.2 <- as.factor(res.km.2$cluster)
+# Colorer les variables par groupes
+plot(fviz_pca_var(res.pca2, col.var = grp.2, palette =  c("seagreen","coral3", "mediumslateblue", "yellow", "magenta"), legend.title = "Cluster",addEllipses = FALSE), repel = TRUE)
+fviz_pca_ind(res.pca2, habillage = "region_viticole", geom.ind = "point") +
+  labs(title = "Floraison au 31/08" ,col = "Région viticole")
+fviz_pca_ind(res.pca2, col.ind = observations$pourcentage_esca, geom.ind = "point") +
+  scale_color_gradientn(colors = c("blue", "yellow", "red"), 
+                        limits = c(0, quantile(observations$pourcentage_esca, 0.95))) +
+  labs(title = "Floraison au 31/08", col = "Incidence esca")
+
+
+print("Débourrement au 31 août :")
+to_use2 <- setdiff(c(var_deb_to_end,"debourrement", "floraison", "annee", "cepage", "age_parcelle_estime", "pourcentage_esca", "region_viticole"), paste0(enlever, ".deb_end"))
+res.pca2 <- PCA(observations[,to_use2], quanti.sup = c("age_parcelle_estime", "pourcentage_esca"),quali.sup = c("annee", "cepage", "region_viticole"), ncp = 10, graph = FALSE)
+set.seed(3)
+res.km.2 <- kmeans(abs(res.pca2$var$coord), centers = 4, nstart = 25)# Créez 2 groupes de variables (centers = 2)
+grp.2 <- as.factor(res.km.2$cluster)
+# Colorer les variables par groupes
+plot(fviz_pca_var(res.pca2, col.var = grp.2, palette =  c("seagreen","coral3", "mediumslateblue", "yellow", "magenta"), legend.title = "Cluster",addEllipses = FALSE), repel = TRUE)
+fviz_pca_ind(res.pca2, habillage = "region_viticole", geom.ind = "point") +
+  labs(title = "Débourrement au 31/08", col = "Région viticole")
+fviz_pca_ind(res.pca2, col.ind = observations$pourcentage_esca, geom.ind = "point") +
+  scale_color_gradientn(colors = c("blue", "yellow", "red"), 
+                        limits = c(0, quantile(observations$pourcentage_esca, 0.95))) +
+  labs(title = "Débourrement au 31/08", col = "Incidence esca")
+```
+
+Chaque période semble avoir ses propres variations et liens inter variables.
+
+Peu importe la période, la région viticole sépare bien les données, ce qui n'est pas le cas de l'incidence d'esca.
+
+
+
+### ACP avec toutes les périodes et variables :
+
+Nous allons effectuer une ACP sur l'ensemble des variables, peu importe la période, et incidence d'esca compris.
+
+```{r}
+res.pca <- PCA(observations[,-c(2,6)],quali.sup = c("annee", "cepage", "region_viticole"), ncp = 10, graph = FALSE)
+head(get_eigenvalue(res.pca2), n = 10)
+print("Graphs des 10 variables qui contribuent le plus :")
+fviz_pca_var(res.pca, select.var = list("contrib" = 10), repel = TRUE)
+#fviz_pca_var(res.pca)
+```
+
+```{r}
+# var = get_pca_var(res.pca)
+# corrplot(var$contrib[,1:10], is.corr = FALSE, title = "Contribution", mar=c(0,0,1,0)) # Contribution 
+# corrplot(var$cos2[,1:10], is.corr = FALSE, title = "Représentation", mar=c(0,0,1,0)) # qualité de représentation
+fviz_contrib(res.pca, choice = "var", axes = c(1:2), top = 10)
+fviz_cos2(res.pca, choice = "var", axes = c(1:2), top = 10)
+```
+
+Trop de variables !
+
+## AFDM :
+
+Nous allons maintenant procéder à une Analyse Factorielle des Données Mixtes (~ACP sur des données quantitatives et qualitatives). Nous utiliserons les variables météorologiques, par années phénologiques, filtrées.
+
+### Année phénologique et sélection de variable :
+
+```{r}
+res.afdm<- FAMD(observations[,to_use], sup.var = c("annee"), graph = FALSE, ncp = 20)
+
+eig.val <- get_eigenvalue(res.afdm)
+head(eig.val,10)
+```
+### Qualité de répresentation et de contribution des variables :
+
+```{r}
+var = get_famd_var(res.afdm)
+corrplot(var$contrib[,1:20], is.corr = FALSE, title = "Contribution", mar=c(0,0,1,0)) 
+corrplot(var$cos2[,1:20], is.corr = FALSE, title = "Représentation", mar=c(0,0,1,0)) # qualité de représentation
+fviz_contrib(res.afdm, choice = "var", axes = c(1:2))
+fviz_cos2(res.afdm, choice = "var", axes = c(1:2))
+```
+
+```{r}
+fviz_famd_ind(res.afdm, habillage =  "region_viticole", geom = c("point"))
+fviz_famd_ind(res.afdm, habillage = "cepage", geom = c("point"))
+```
+
+```{r}
+# fviz_famd_ind(res.afdm, col.ind = observations$pourcentage_esca, 
+#               gradient.cols = c("blue", "yellow", "red"), geom = c("point"))
+
+
+# Récupération des coordonnées
+coord <- as.data.frame(res.afdm$ind$coord)
+
+# Ajout de la variable continue
+coord$pourcentage_esca <- observations$pourcentage_esca
+
+coord$couleur <- ifelse(coord$pourcentage_esca > 10, "noir", coord$pourcentage_esca)
+
+
+ggplot(coord, aes(x = Dim.1, y = Dim.2)) +
+  # Couche 1 : points > 20, en noir
+  geom_point(data = subset(coord, pourcentage_esca > 10),
+             aes(x = Dim.1, y = Dim.2),
+             color = "black", size = 2) +
+  
+  # Couche 2 : points ≤ 20, avec dégradé
+  geom_point(data = subset(coord, pourcentage_esca <= 10),
+             aes(x = Dim.1, y = Dim.2, color = pourcentage_esca),
+             size = 2) +
+  
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(x = "Dimension 1", y = "Dimension 2", color = "Pourcentage Esca") +
+  theme_minimal()
+
+
+```
+
+```{r}
+fviz_famd_var(res.afdm, col.var = "bisque4", label = c( "var"), repel = TRUE)
+```
+
+La région viticole et le cépage semblent très importants, et quelque peu "resumer" les autres variables.
+
+Cependant, les variables météo ne semblent pas liées à l'incidence de l'esca.
+
+## Réduction de dimension non-linéaire :
+
+Nous allons réaliser les mêmes analyses via des méthodes de réduction de dimension non-linéaire, uniquement sur les variables météorologiques, par années phénologiques, filtrées.
+
+! Attention c'est long !
+
+### Multi-Dimensional Scaling
+~environ une ACP à partir d'une matrice de distance
+
+```{r, cache=TRUE}
+library(MASS)
+to_use <- setdiff(c(var_an_pheno,"debourrement", "floraison"), c("bh0", "tn", "tx", "rr", "et0", "sum.heat.days.25", "sum.heat.days.30", "hu", "ftsw", "isv.faible.seq.5", "isv.faible.seq.10", "isv.faible.seq.15",
+"isv.fai_mod.seq.5", "isv.fai_mod.seq.10", "isv.fai_mod.seq.15",
+"isv.mod_sev.seq.5", "isv.mod_sev.seq.10", "isv.mod_sev.seq.15",
+"isv.sev.seq.5", "isv.sev.seq.10", "isv.sev.seq.15", "auc_isv", "longueur_periode"))
+
+MDS <- cmdscale(dist(scale(observations[,to_use])))
+MDS = as.data.frame(MDS)
+MDS$region_viticole = observations$region_viticole
+MDS$cepage = observations$cepage
+MDS$pourcentage_esca = observations$pourcentage_esca
+
+ggplot(MDS) + geom_point(aes(x = V1, y = V2, col = region_viticole)) + 
+  labs(title = "Multi-Dimensional Scaling et région viticole", col = "Région viticole")
+
+ggplot(MDS) + geom_point(aes(x = V1, y = V2, col = pourcentage_esca)) +  scale_color_gradient2(low = "blue3", high = "red2", mid = "white", midpoint = mean(MDS$pourcentage_esca), limit = c(min(MDS$pourcentage_esca), 20), space = "Lab") + 
+  labs(title = "Multi-Dimensional Scaling et incidence d'ESCA", col = "Pourcentage d'esca")
+```
+
+### T-SNE
+~Multi dimensional scaling en passant par des lois de distribution.
+
+```{r, cache=TRUE}
+library(tsne)
+
+tsne <- tsne(dist(scale(observations[,to_use])), k = 2, max_iter = 500)
+tsne = as.data.frame(tsne)
+tsne$region_viticole = observations$region_viticole
+tsne$cepage = observations$cepage
+tsne$pourcentage_esca = observations$pourcentage_esca
+
+ggplot(tsne) + geom_point(aes(x = V1, y = V2, col = region_viticole)) + 
+  labs(title = "T-sne et incidence d'ESCA", col = "Région viticole")
+
+ggplot(tsne) + geom_point(aes(x = V1, y = V2, col = pourcentage_esca)) +  scale_color_gradient2(low = "blue3", high = "red2", mid = "white", midpoint = mean(tsne$pourcentage_esca), limit = c(min(tsne$pourcentage_esca), 20), space = "Lab") + 
+  labs(title = "T-sne et incidence d'ESCA", col = "Pourcentage d'esca")
+```
+
+
+### Isomap
+~Multi dimensional scaling à partir d'un graph de voisinage : distance = nombre de voisins entre deux points
+
+```{r, cache=TRUE}
+library('RDRToolbox')
+
+# Isomap :
+res = Isomap(as.matrix(scale(observations[,to_use])), dims = 2, k = 5)
+Xiso = res[[1]]
+Xiso = as.data.frame(Xiso)
+Xiso$region_viticole = observations$region_viticole
+
+ggplot(Xiso) + geom_point(aes(x = V1, y = V2, col = region_viticole)) + 
+  labs(title = "ISOMAP et région viticole", col = "Région viticole")
+
+
+Xiso$pourcentage_esca <- observations$pourcentage_esca
+ggplot(Xiso) + geom_point(aes(x = V1, y = V2, col = pourcentage_esca)) +  scale_color_gradient2(low = "blue3", high = "red2", mid = "white", midpoint = mean(Xiso$pourcentage_esca), limit = c(min(Xiso$pourcentage_esca), 20), space = "Lab") + 
+  labs(title = "ISOMAP et incidence d'esca", col = "Pourcentage d'esca")
+```
+
+
+On peut tirer les mêmes conclusions de ces réductions de dimension non linéaire : Les données météorologiques se regroupent par régions, mais il ne semble pas y avoir de lien global avec l'incidence d'esca.

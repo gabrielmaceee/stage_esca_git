@@ -1,0 +1,765 @@
+---
+title: "xgb avec Python"
+author: "Gabriel Macé"
+date: "2025-05-26"
+output: html_document
+---
+
+Ce script écrit en python, a pour but d'explorer le potentiel de régression d'un modèle XGBoost appliqué à nos données, et d'interpréter le rôle des variables à l'aide des valeurs de shapley.
+
+```{r, echo=FALSE, results='asis'}
+cat('<script src="https://cdn.jsdelivr.net/npm/shap@latest/shap.min.js"></script>')
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# Installer et utiliser python via reticulate et miniconda :
+library(reticulate)
+# # reticulate::install_miniconda()
+# use_miniconda()
+
+# Ou alors créer un environnement python (ex : "bayesenv") et l'utiliser (cela peut être utile pour les gros packages)
+# Dis à R d’utiliser le bon environnement Python
+# use_python("C:/Users/Lucas/AppData/Local/r-miniconda/envs/bayesenv/python.exe", required = TRUE)
+```
+
+```{r}
+# Les librairies python à installer : 
+# py_install("matplotlib",pip=TRUE)
+# py_install("seaborn",pip=TRUE)
+# py_install("pandas",pip=TRUE)
+# py_install("numpy",pip=TRUE)
+# py_install("scikit-learn",pip=TRUE)
+# py_install("numpy",pip=TRUE)
+# py_install("xgboost",pip=TRUE)
+# py_install("shap",pip=TRUE)
+# py_install("pyreadr", pip = TRUE)
+# py_install("openpyxl", pip = TRUE)
+# py_install("ipython", pip = TRUE)
+# py_install("pycebox", pip = TRUE)
+# py_install("plotly", pip = TRUE)
+# py_install("prince", pip = TRUE) # FAMD
+```
+
+```{python}
+# Importation des bibliothèques nécessaires
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from sklearn.tree import DecisionTreeClassifier, plot_tree
+from sklearn.model_selection import train_test_split,cross_val_score
+from sklearn.metrics import classification_report
+import pyreadr
+```
+
+```{python}
+# Chargement des données
+observations = pyreadr.read_r("../../data/modelisation/observations.RData")["observations"]
+observations = pd.DataFrame(observations)
+# observations = observations.loc[observations.pourcentage_esca < 20]
+```
+
+### Préparation des données :
+
+```{python}
+var_an_pheno = list(observations.columns[12:47]) # ne pas garder la longueur de la période = 365 ou 366
+var_an = list(observations.columns[49:84]) # ne pas garder la longueur de la période
+var_dormance = list(observations.columns[85:121])
+var_deb_to_flo = list(set(observations.columns[122:158]) - set(["sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"]))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes = list(set(observations.columns[159:195]) - set(["sum.frost.days.0.symptomes"])) # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end = list(observations.columns[196:232])
+
+var_tt = var_an_pheno + var_an + var_dormance + var_deb_to_flo + var_symptomes + var_deb_to_end
+
+observations['cepage'] = observations['cepage'].astype('category')
+observations['region_viticole'] = observations['region_viticole'].astype('category')
+```
+
+
+```{python}
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+
+score_var = pd.read_excel("../../data/resultats/r2_rmse_par_variable.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars = var_tt + list(["age_parcelle_estime", "RU", "debourrement", "floraison" ])
+to_rm = []
+for var1 in vars:
+    if var1 not in to_rm:
+        for var2 in list(set(vars) - set([var1] + to_rm)):
+            corr = np.corrcoef(observations[var1], observations[var2])[0, 1]
+            if corr > 0.8:
+                rmse1 = score_var.loc[score_var["variable"] == var1, "rmse"].values[0]
+                rmse2 = score_var.loc[score_var["variable"] == var2, "rmse"].values[0]
+                if rmse1 > rmse2:
+                    to_rm.append(var1)
+                else:
+                    to_rm.append(var2)
+                break
+
+
+to_keep = list(["cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+
+features = pd.get_dummies(observations[to_keep])
+```
+
+
+```{python}
+# Préparation des données
+#X = observations[to_keep]
+X = features
+y = observations['pourcentage_esca']
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+## XGBoost et CV 
+
+```{python}
+### Création de la grille des hyperparamètres à tester par cross-validation
+from sklearn.model_selection import  GridSearchCV
+from xgboost import XGBRegressor
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=5, n_jobs=1, verbose=0)
+```
+
+```{python, eval = FALSE}
+# Recherche des meilleurs hyperparamètres par cross-validation
+grid_search.fit(X_train, y_train)
+
+# Affichage des meilleurs paramètres
+print("Best parameters found: ", grid_search.best_params_)
+```
+
+
+```{python, eval = FALSE}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+best_model = grid_search.best_estimator_
+y_train_pred = best_model.predict(X_train)
+y_test_pred = best_model.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+```
+## XGBoost avec entrainement / test
+
+```{python}
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+best_model = XGBRegressor(learning_rate = 0.1, max_depth = 6, n_estimators = 200, objective = 'count:poisson')
+best_model.fit(X_train, y_train)
+y_train_pred = best_model.predict(X_train)
+y_test_pred = best_model.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+## XGBoost et intervalle de prédiction
+
+```{python}
+def quantile_loss(alpha):
+    def loss(y_true, y_pred):
+        residual = y_true - y_pred
+        grad = np.where(residual > 0, alpha - 1, alpha)
+        hess = np.ones_like(residual)
+        return grad, hess
+    return loss
+
+quantiles = [0.025, 0.975]
+models = {}
+
+# Suppose X and y are defined
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+for quantile in quantiles:
+    model = XGBRegressor(
+        learning_rate=0.1,
+        max_depth=6,
+        n_estimators=200,
+        objective=quantile_loss(quantile)
+    )
+    model.fit(X_train, y_train)
+    models[quantile] = model
+
+# Prédiction
+preds_025 = models[0.025].predict(X_test)
+preds_975 = models[0.975].predict(X_test)
+
+# Vérification de l'inclusion dans l'intervalle
+within_interval = (y_test <= preds_025) & (y_test >= preds_975)
+n_within = np.sum(within_interval)
+
+print(f"Nombre d'observations dans l'intervalle [0.025, 0.975] : {n_within} / {len(y_test)}")
+
+```
+
+### Valeurs de Shapley
+
+
+```{python}
+# Ajutement sur l'ensemble des observations du meilleur modèle trouvé
+best_model = XGBRegressor(learning_rate = 0.1, max_depth = 6, n_estimators = 200, objective = 'count:poisson')
+best_model.fit(X, y)
+y_pred = best_model.predict(X)
+
+import shap
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(best_model)
+
+# Calcul des valeurs SHAP
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+```{python}
+# Choisir un exemple spécifique à expliquer
+# i = 0 # Choisir l'indice de l'exemple que vous souhaitez expliquer
+# shap_ind = shap.force_plot(explainer.expected_value, shap_values[i,:], X.iloc[i,:])
+# 
+# # Enregistrement dans un fichier HTML
+# shap.save_html("../../graphs/modelisation/shap_xbg_cv_ind.html", shap_ind)
+```
+
+```{python}
+# shap_values_wf = explainer(X)
+# water_fall_ind = shap.plots.waterfall(shap_values_wf[0])
+```
+
+```{python}
+# Importance des variables dans le processus de décision des arbres (non shapley) :
+import matplotlib.pyplot as plt
+from xgboost import plot_importance
+
+# Affichage de l'importance des caractéristiques
+plot_importance(best_model, max_num_features=10)
+plt.gca().tick_params(labelsize=7)
+plt.show()
+```
+
+```{python}
+# Valeurs de shap :
+# Tracer le graphique SHAP de synthèse
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+```
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+```
+
+
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  # print(feature)
+  # # Calculer la dépendance partielle
+  # pdp_goals, axes = partial_dependence(best_model, X, features=[feature])
+  # # Créer le display
+  # display = PartialDependenceDisplay.from_estimator(best_model, X, features=[feature])
+  # 
+  # # Afficher le graphique
+  # display.plot()
+  # plt.show()
+  # plt.clf()
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+```
+
+
+
+```{python}
+# # visualize all the training set predictions
+# force_plot = shap.plots.force(explainer.expected_value, shap_values[:len(X)], features=X, feature_names=X.columns)
+# 
+# # Enregistrement dans un fichier HTML
+# shap.save_html("../../graphs/modelisation/shap_xbg_cv.html", force_plot)
+
+```
+
+
+### Train / test par année :
+
+```{python}
+# Préparation des données
+# X = observations[to_keep]
+X = features
+y = observations['pourcentage_esca']
+
+rmse_train = []
+rmse_test = []
+
+for an in range(2003, 2024):
+  X_train = X.loc[observations.annee == an]
+  X_test = X.loc[observations.annee != an]
+  y_train = y.loc[observations.annee == an]
+  y_test = y.loc[observations.annee != an]
+  
+  model = XGBRegressor(learning_rate = 0.1, max_depth = 6, n_estimators = 200, objective = 'count:poisson', verbose=0)
+  model.fit(X_train, y_train)
+  y_train_pred = model.predict(X_train)
+  y_test_pred = model.predict(X_test)
+  
+  rmse_train.append(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+  rmse_test.append(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+```
+
+```{python}
+plt.clf()
+plt.plot(range(2003, 2024), rmse_test)
+plt.title("RMSE test par an")
+plt.show()
+```
+
+AVant 2011 et 2003, maintenant 2003, 2019 et 2022 = compliquées. En général, la rmse augmente de 1 ! -> effet année important avec xgb.
+
+
+
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!La suite est du brouillon !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+
+## Catégories d'incidence d'esca
+
+```{python}
+observations = observations.assign(esca_categoriel = 0)
+observations.loc[observations.pourcentage_esca >= 1,'esca_categoriel'] = 1 
+observations.loc[observations.pourcentage_esca >= 2,'esca_categoriel'] = 2
+observations.loc[observations.pourcentage_esca >= 5,'esca_categoriel'] = 3
+observations.loc[observations.pourcentage_esca >= 10,'esca_categoriel'] = 4
+# observations.loc[observations.pourcentage_esca >= 20,'esca_categoriel'] = 5
+observations.esca_categoriel = observations['esca_categoriel'].astype('category')
+```
+
+
+```{python}
+# Préparation des données
+# X = observations[to_keep]
+X = features
+y = observations['esca_categoriel']
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+```
+
+### Train / test
+
+```{python}
+from xgboost import XGBClassifier
+classifieur = XGBClassifier(learning_rate = 0.05, max_depth = 9, n_estimators = 200)
+classifieur.fit(X_train, y_train)
+y_train_pred = classifieur.predict(X_train)
+y_test_pred = classifieur.predict(X_test)
+```
+
+```{python}
+from sklearn.metrics import classification_report
+from sklearn.metrics import accuracy_score
+print(classification_report(y_test, y_test_pred))
+print(classification_report(y_train, y_train_pred))
+print(accuracy_score(y_train, y_train_pred))
+print(accuracy_score(y_test, y_test_pred))
+```
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+
+pd.crosstab(y_test, y_test_pred)
+```
+
+```{python, eval = FALSE}
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9, 12, 15],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [100, 200,500]
+}
+
+# Création de l'objet GridSearch
+model = XGBClassifier()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python, eval = FALSE}
+# Entraînement du modèle avec GridSearch
+grid_search.fit(X, y)
+
+# Affichage des meilleurs paramètres
+print("Best parameters found: ", grid_search.best_params_)
+```
+
+```{python, eval = FALSE}
+classifieur_cv = grid_search.best_estimator_
+classifieur_cv.fit(X_train, y_train)
+y_train_pred = classifieur_cv.predict(X_train)
+y_test_pred = classifieur_cv.predict(X_test)
+```
+
+```{python, eval = FALSE}
+print(classification_report(y_test, y_test_pred))
+print(classification_report(y_train, y_train_pred))
+print(accuracy_score(y_train, y_train_pred))
+```
+
+
+
+```{python}
+
+```
+
+
+## Binaire : sup 20 :
+
+On peut faire avec 15 mais c'est plus dur à dissocier
+
+### Augmentation du nombre de >= 20 :
+
+```{python}
+observations = observations.assign(sup_20 = 0)
+observations.loc[observations.pourcentage_esca >= 20,'sup_20'] = 1 
+```
+
+```{python}
+idx = np.random.choice(observations.loc[observations.pourcentage_esca >= 20].index, size=4000, replace=True, p=None)
+sup_20_augmented = pd.concat([observations, observations.loc[idx]])
+```
+
+### XGBoost :
+
+```{python}
+# Préparation des données
+X = pd.get_dummies(sup_20_augmented[to_keep])
+y = sup_20_augmented['sup_20']
+esca = sup_20_augmented['pourcentage_esca']
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test, esca_train, esca_test = train_test_split(X, y, esca, test_size=0.2)
+```
+
+```{python}
+from xgboost import XGBClassifier
+classifieur = XGBClassifier(learning_rate = 0.5, max_depth = 9, n_estimators = 50)
+classifieur.fit(X_train, y_train)
+y_train_pred = classifieur.predict(X_train)
+y_test_pred = classifieur.predict(X_test)
+```
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+
+pd.crosstab(y_test, y_test_pred)#[1][1]
+```
+
+```{python}
+print("Train :")
+print(esca_train.loc[y_train != y_train_pred])
+print("Test :")
+print(esca_test.loc[y_test != y_test_pred])
+```
+
+```{python}
+import matplotlib.pyplot as plt
+from xgboost import plot_importance
+
+# Affichage de l'importance des caractéristiques
+plot_importance(classifieur, max_num_features=10)
+plt.gca().tick_params(labelsize=7)
+plt.show()
+# np.mean(observations.loc[observations.pourcentage_esca < 20,'age_parcelle_estime'])
+# 20.5
+# np.mean(observations.loc[observations.pourcentage_esca >= 20,'age_parcelle_estime'])
+# 19
+```
+
+
+### Processus gaussien :
+
+```{python}
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+to_use = list(["cepage", "region_viticole", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.dormance", "swi.dormance", "auc_isv.symptomes", "tv.deb_end"])
+X = sup_20_augmented[to_use] # to_keep
+X = pd.get_dummies(X)
+
+scaler = StandardScaler()
+# var_cont = list(set(vars) - set(to_rm))
+var_cont = list(set(to_use) - set(["cepage", "region_viticole"]))
+X[var_cont] = scaler.fit_transform(X[var_cont])
+
+y = sup_20_augmented['sup_20']
+
+from sklearn.decomposition import PCA
+pca = PCA(n_components=12)  # ou 12 ou 20, à tester
+X_reduced = pca.fit_transform(X)
+np.sum(pca.explained_variance_ratio_)
+```
+
+```{python}
+from sklearn.gaussian_process import GaussianProcessClassifier
+from sklearn.gaussian_process.kernels import *
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test, esca_train, esca_test = train_test_split(X, y, esca, test_size=0.2)
+
+gp_classifieur = GaussianProcessClassifier(kernel=RationalQuadratic(), random_state=0,  n_restarts_optimizer=0)
+# RationalQuadratic() : 28 erreurs
+# Matern : test : 76 erreurs
+# RBF = pas fou
+# DotProduct() + WhiteKernel() = Horrible
+gp_classifieur.fit(X_train, y_train)
+y_train_pred = gp_classifieur.predict(X_train)
+y_test_pred = gp_classifieur.predict(X_test)
+```
+
+
+```{python}
+pd.crosstab(y_train, y_train_pred)
+# true = à gauche, prédiction = en haut
+
+pd.crosstab(y_test, y_test_pred)#[1][1]
+```
+
+XGBoost et GaussianProcess: On détecte tous les >= 20 !
+
+```{python}
+print("Train :")
+print(esca_train.loc[y_train != y_train_pred])
+print("Test :")
+print(esca_test.loc[y_test != y_test_pred])
+```
+
+
+
+## Gaussian process
+
+### Réduction de la dimension
+
+Les processus gaussiens ont du mal à utiliser plus que 12 variables prédictives.
+
+```{python, eval = FALSE}
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+to_use = list(["cepage", "region_viticole", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.dormance", "swi.dormance", "auc_isv.symptomes", "tv.deb_end"])
+X = observations[to_use] # to_keep
+X = pd.get_dummies(X)
+
+y = observations['pourcentage_esca'].loc[X.index]
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+scaler = StandardScaler()
+var_cont = list(set(to_use) - set(["cepage", "region_viticole"]))
+X_train[var_cont] = scaler.fit_transform(X_train[var_cont])
+X_test[var_cont] = scaler.transform(X_test[var_cont])
+
+from sklearn.decomposition import PCA
+pca = PCA(n_components=12)  # n_components= 10 ou  12 ou 20, à tester
+X_train = pca.fit_transform(X_train)
+np.sum(pca.explained_variance_ratio_)
+
+X_test = pca.transform(X_test)
+```
+
+```{python, eval = FALSE}
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import *
+# kernel = DotProduct() + WhiteKernel() # rmse test : 5.5
+# kernel = RBF() # test RMSE : 5.15, alpha = 1
+# kernel = 1**2 * RBF(length_scale=1) : sur-apprentissage
+# kernel = RationalQuadratic()
+# kernel = Matern() # test RMSE : 5.09, alpha = 0.5
+# kernel = ExpSineSquared()
+# Kernel = fonction de covariance des y
+# alpha = covarainces des erreurs
+# gpr = GaussianProcessRegressor(kernel=kernel,
+#         random_state=0, normalize_y=True, alpha=1, n_restarts_optimizer=1).fit(X_train, y_train)
+# gpr.score(X_train, y_train) # s'approcher de 1
+```
+
+```{python, eval = FALSE}
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X_reduced, y, test_size=0.2)
+gpr = GaussianProcessRegressor(kernel=Matern(),
+        random_state=0, normalize_y=True, alpha=0.5, n_restarts_optimizer=0).fit(X_train, y_train)
+y_train_pred = gpr.predict(X_train, return_std=True)
+y_test_pred = gpr.predict(X_test, return_std=True)
+
+# Variables séléctionnées : Matern, alpha = 0.5 : 4.8, 3.2
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred[0])**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred[0])))
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred[0])**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred[0])))
+```
+
+```{python}
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X_reduced, y, test_size=0.2)
+# Suppose y suit une loi de Poisson
+y_transformed_train = np.log(y_train + 1)
+
+# Entraîner le modèle
+gpr = GaussianProcessRegressor(kernel=Matern(), random_state=0, normalize_y=True, alpha=1.5, n_restarts_optimizer=1)
+gpr.fit(X_train, y_transformed_train) # 6, 3.5, alpha = 1.25, Matern()
+# Matern(), alpha 1.5 : 5.5, 3.4
+# variable sélectionnées : Matern(), alpha 1.5 : 5.2, 3.2
+
+# Prédiction du log(lambda), puis inversion
+y_test_pred = gpr.predict(X_test, return_std=True)[0]
+y_test_pred = np.exp(y_test_pred) - 1
+
+y_train_pred = gpr.predict(X_train, return_std=True)[0]
+y_train_pred = np.exp(y_train_pred) - 1
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+```
+
+```{python, eval = FALSE}
+y_train_pred = gpr.predict(X_train, return_std=True)
+y_test_pred = gpr.predict(X_test, return_std=True)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred[0])**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred[0])))
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred[0])**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred[0])))
+```
+
+```{python}
+mean_prediction = y_test_pred[0]
+std_prediction =  y_test_pred[1]
+
+# Vérification de l'inclusion dans l'intervalle
+within_interval = (y_test <= mean_prediction + 1.96 * std_prediction) & (y_test >= mean_prediction - 1.96 * std_prediction)
+n_within = np.sum(within_interval)
+
+print(f"Nombre d'observations dans l'intervalle [0.025, 0.975] : {n_within} / {len(y_test)}")
+```
+
+```{python, eval = FALSE}
+# from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # Noyau des covariances
+    'kernel': [DotProduct() + WhiteKernel(), RBF(), RationalQuadratic(), Matern(), ExpSineSquared()],
+    
+    # Covariance des erreurs
+    'alpha': [0.05, 0.1, 1, 1.25, 1.5, 2],
+}
+
+# Création de l'objet GridSearch
+model = GaussianProcessRegressor(normalize_y=True)
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+
+```{python, eval = FALSE}
+# Entraînement du modèle avec GridSearch
+grid_search.fit(X_train, y_train)
+
+# Affichage des meilleurs paramètres
+print("Best parameters found: ", grid_search.best_params_)
+
+# Best parameters found:  {'alpha': 0.1, 'kernel': RationalQuadratic(alpha=1, length_scale=1)}
+```
+
+
+
+```{python, eval = FALSE}
+gpr_cv = GaussianProcessRegressor(kernel=Matern(length_scale=1, nu=1.5),
+        random_state=0, normalize_y=False, alpha=1.5, n_restarts_optimizer=1).fit(X_train, y_train)
+# normalize_y = False, 'alpha': 1.5, 'kernel': Matern(length_scale=1, nu=1.5), test : rmse = 5.6, m.e = 3.5
+# normalize_y = True, 'alpha': 0.1, 'kernel': RationalQuadratic(alpha=1, length_scale=1), test: rmse: 6.1, m.e : 3.7
+y_train_pred = gpr_cv.predict(X_train, return_std=True)
+y_test_pred = gpr_cv.predict(X_test, return_std=True)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred[0])**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred[0])))
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred[0])**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred[0])))
+```
+
+

@@ -1,0 +1,832 @@
+---
+title: "glm"
+author: "Gabriel Macé"
+date: "2025-05-27"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+Ce script écrit en R, a pour but d'explorer le potentiel des modèles linéaires, appliqué à nos données.
+
+```{r}
+library(lme4)
+library(dplyr)
+library(ggplot2)
+library(Metrics) # RMSE
+library(openxlsx)
+library(caret) # cv et findCorrelation
+
+load("../../data/modelisation/observations.RData")
+# observations <- observations[which(observations$pourcentage_esca < 15),]
+```
+
+
+```{r}
+# library(bestNormalize)
+# 
+# # Cherche la meilleure transformation
+# bn <- bestNormalize(observations$pourcentage_esca)
+# y_transformed <- predict(bn)
+# plot(density(y_transformed))
+# y_inverse <- predict(bn, newdata = y_transformed, inverse = TRUE) # exact
+# observations$y_normal <- y_transformed
+```
+
+## Préparation des données :
+
+```{r}
+# récupération des variables par type de période :
+var_an_pheno <- colnames(observations)[13:48] # ne pas garder la longueur de la période = 365 ou 366
+var_an <- colnames(observations)[50:85] # ne pas garder la longueur de la période
+var_dormance <- colnames(observations)[86:122]
+var_deb_to_flo <- setdiff(colnames(observations)[123:159] , c("sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes <- setdiff(colnames(observations)[160:196], "sum.frost.days.0.symptomes") # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end <- colnames(observations)[197:233]
+var_tt <- c("age_parcelle_estime","RU", "debourrement", "floraison", var_an_pheno, var_an, var_dormance, var_deb_to_flo, var_symptomes, var_deb_to_end)
+
+observations$cepage <- as.factor(observations$cepage)
+observations$region_viticole <- as.factor(observations$region_viticole)
+
+# observations <- observations[observations$pourcentage_esca != 0,]
+
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = dim(observations)[1]*0.8)
+obs_20 <- observations[which(observations$pourcentage_esca >= 20),]
+```
+
+## Tests
+
+Tester les différences entre les observations avec une incidence >= 20, et les autres.
+
+```{r}
+pval_t <- c() # H0 : égalité des moyennes, paramètrique
+pval_bartlett <- c() # H0 : égalité des variances, paramètrique
+pval_kw <- c() # H0 : égalité des distributions, non paramètrique
+
+# obs <- rbind(observations, obs_20)
+obs <- observations
+obs$sup_20 <- c(rep("<20", dim(observations)[1]), rep(">=20", dim(obs_20)[1]))
+
+for(var in var_tt){
+  pval_t = c(pval_t, t.test(obs_20[,var], observations[,var])$p.value)
+  pval_bartlett = c(pval_bartlett, bartlett.test(obs[,var], obs[,"sup_20"])$p.value)
+  pval_kw = c(pval_kw, kruskal.test(obs[,var], obs[,"sup_20"])$p.value)
+}
+res = data.frame(var = var_tt, t = pval_t, t_corr = p.adjust(pval_t, method = "BH", n = length(pval_t)),
+                 bartlett = pval_bartlett, bartlett_corr = p.adjust(pval_bartlett, method = "BH", n = length(pval_bartlett)),
+                 kw = pval_kw, kw_corr = p.adjust(pval_kw, method = "BH", n = length(pval_kw)))
+
+table(res$t_corr > 0.05 & res$bartlett_corr > 0.05 & res$kw_corr > 0.05) 
+# 87 sur 217 variables où on rejette aucune hypothèse nulle
+table(res$t_corr < 0.05 & res$bartlett_corr < 0.05 & res$kw_corr < 0.05)
+# 44 variables sur 217 où on rejette toutes les hypothèses nulles
+```
+## Régressions linéaires
+### Uniquement région viticole et cépage :
+
+```{r}
+print("R² avec seulement la région viticole")
+summary(lm(pourcentage_esca~region_viticole, data = observations[, c("pourcentage_esca", "region_viticole")]))$r.squared
+print("R² avec seulement le cépage")
+summary(lm(pourcentage_esca~cepage, data = observations[, c("pourcentage_esca", "cepage")]))$r.squared
+# r2 region viti : 0.1516, r2 cepage : 0.2222, r2 ensemble : 0.24
+
+model_lm <- lmer(pourcentage_esca~(1|cepage) + (1|region_viticole), data = observations[i_train, c("cepage", "region_viticole", "pourcentage_esca")]) # , family = poisson(link = "log")
+print("RMSE :")
+rmse(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train, c("cepage", "region_viticole")]))
+print("Erreur moyenne absolue :")
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_lm, observations[-i_train, c("cepage", "region_viticole")])))
+
+model_lm <- lmer(pourcentage_esca~(1|cepage) * (1|region_viticole), data = observations[i_train, c("cepage", "region_viticole", "pourcentage_esca")]) # , family = poisson(link = "log")
+print("RMSE :")
+rmse(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train, c("cepage", "region_viticole")]))
+print("Erreur moyenne absolue :")
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_lm, observations[-i_train, c("cepage", "region_viticole")])))
+```
+
+
+### Modèle linéaire complet :
+
+#### Train / test :
+
+```{r}
+# library(MASS)
+### glm.nb
+# observations = observations[!(duplicated(observations[, c("annee", "cepage", "ID_MAILLE", "age_parcelle_estime")]) | duplicated(observations[, c("annee", "cepage", "ID_MAILLE", "age_parcelle_estime")], fromLast = TRUE)),]
+
+# observations = observations[!duplicated(observations[, c("annee", "cepage", "ID_MAILLE", "age_parcelle_estime")]),]
+# observations$pourcentage_esca <- 2 * sqrt(observations$pourcentage_esca + 3/8)
+# inverse <- function(x) return((x/2)^2 - 3/8)
+
+fixed_effects <- paste(colnames(observations[,-c(1,2,3,5,6,7)]), collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, "+ (1|cepage) + (1|region_viticole)"))
+
+# i_train = sample(1:dim(observations)[1], replace = FALSE, size = dim(observations)[1]*0.8)
+model_lm <- glmer(form, data = observations[i_train ,-c(1, 2, 6)]) # , family = poisson(link = "log") , , family = quasipoisson(link = "log"), nAGQ = 0
+# (1|cepage) * (1|region_viticole) -> sur apprentissage, et n'améliore pas beaucoup le train 
+
+print("RMSE train :")
+rmse(observations$pourcentage_esca[i_train], predict(model_lm, observations[i_train ,-c(1, 2, 5, 6)]))
+print("Erreur moyenne absolue train :")
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_lm, observations[i_train ,-c(1, 2, 5, 6)])))
+print("R² train :")
+cor(observations$pourcentage_esca[i_train], predict(model_lm, observations[i_train ,-c(1, 2, 5, 6)]))^2
+
+print("RMSE test :")
+rmse(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train ,-c(1, 2, 5, 6)]))
+print("Erreur moyenne absolue test :")
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_lm, observations[-i_train ,-c(1, 2, 5, 6)])))
+print("R² test :")
+cor(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train ,-c(1, 2, 5, 6)]))^2
+
+plot(observations$pourcentage_esca[-i_train], abs(observations$pourcentage_esca[-i_train] - predict(model_lm, observations[-i_train ,-c(1, 2, 5, 6)])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train ,-c(1, 2, 5, 6)]),
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+lines(0:20, 0:20, col="red")
+```
+
+### Sans train / test :
+
+```{r}
+model_lm <- lmer(pourcentage_esca~. + (1|cepage) + (1|region_viticole), data = observations[ ,-c(1, 2, 6)]) # , family = poisson(link = "log")
+print("RMSE :")
+rmse(observations$pourcentage_esca, predict(model_lm, observations[, -c(1, 2, 5, 6)]))
+print("Erreur moyenne absolue :")
+mean(abs(observations$pourcentage_esca - predict(model_lm, observations[, -c(1, 2, 5, 6)])))
+print("R² :")
+cor(observations$pourcentage_esca, predict(model_lm, observations[ ,-c(1, 2, 5, 6)]))^2
+# cor(predict(model_lm, observations[,-c(1, 2, 6)]), observations$pourcentage_esca)^2# r2 tt = 0.34
+# Modèle linéaire : rmse ~=5, erreur moyenne ~= 3.4
+```
+
+
+### Train / test par an :
+
+```{r}
+rmses <- c()
+
+for(an in 2003:2023){
+  test = which(observations$annee == an)
+  train = which(observations$annee != an)
+  model_lm <- glmer(pourcentage_esca~. + (1|cepage) + (1|region_viticole), data = observations[train ,-c(1, 2, 6)])
+  rmses <- c(rmses, rmse(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train ,-c(1, 2, 5, 6)])))
+}
+
+plot(2003:2023, rmses, main = "RMSE par année", type = "l", xlab = "Année")
+```
+
+2007 (très humide à priori) = plus dur à priori mais échelle biaisée, en soi la différence avec les autres années n'est pas énorme.
+
+#### Ajout non linéaire :
+ 
+Ajout d'effets aléatoires ou d'intéractions sur les variables où le lien avec l'incidence d'esca ne semble pas linéaire (cf : "8_xgb_python_var_tt.html")
+
+```{r}
+obs <- observations
+obs$age_10_15 <- 0
+obs$age_10_15[obs$age_parcelle_estime <= 15] <- 1
+
+obs$age_15_25 <- 0
+obs$age_15_25[obs$age_parcelle_estime > 15 & obs$age_parcelle_estime <= 25] <- 1
+
+obs$age_25_30 <- 0
+obs$age_25_30[obs$age_parcelle_estime > 25] <- 1
+
+obs$ftsw_sympt_inf_0_4 <- 0
+obs$ftsw_sympt_inf_0_4[obs$ftsw.symptomes <= 0.4] <- 1
+
+obs$ftsw_sympt_sup_0_4 <- 0
+obs$ftsw_sympt_sup_0_4[obs$ftsw.symptomes > 0.4] <- 1
+
+obs$et0_sympt_inf_4 <- 0
+obs$et0_sympt_inf_4[obs$et0.symptomes <= 4] <- 1
+
+obs$et0_sympt_sup_4 <- 0
+obs$et0_sympt_sup_4[obs$et0.symptomes > 4] <- 1
+```
+
+```{r}
+fixed_effects <- paste(colnames(observations[,-c(1,2,3,5,6,7)]), collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, "+ (1|cepage) + (1|region_viticole)",
+                         "+ age_parcelle_estime * age_10_15",
+                         "+ age_parcelle_estime * age_15_25",
+                         "+ age_parcelle_estime * age_25_30",
+                         "+ ftsw_sympt_inf_0_4 * ftsw.symptomes",
+                         "+ ftsw_sympt_sup_0_4 * ftsw.symptomes",
+                         "+ et0_sympt_inf_4 * et0.symptomes",
+                         "+ et0_sympt_sup_4 * et0.symptomes"
+                         ))
+
+# i_train = sample(1:dim(obs)[1], replace = FALSE, size = dim(obs)[1]*0.8)
+model_lm <- glmer(form, data = obs[i_train ,-c(1, 2, 6)]) 
+
+print("RMSE train :")
+rmse(obs$pourcentage_esca[i_train], predict(model_lm, obs[i_train ,-c(1, 2, 5, 6)]))
+print("Erreur moyenne absolue train :")
+mean(abs(obs$pourcentage_esca[i_train] - predict(model_lm, obs[i_train ,-c(1, 2, 5, 6)])))
+print("RMSE test :")
+rmse(obs$pourcentage_esca[-i_train], predict(model_lm, obs[-i_train ,-c(1, 2, 5, 6)]))
+print("Erreur moyenne absolue test :")
+mean(abs(obs$pourcentage_esca[-i_train] - predict(model_lm, obs[-i_train ,-c(1, 2, 5, 6)])))
+```
+
+Ne change pas grand chose, mais a beaucoup moins de variables d'entrée.
+
+### Intervalles de prédictions :
+
+```{r}
+library(merTools)
+pred <- predictInterval(
+  merMod = model_lm,
+  newdata = observations[-i_train, -c(1, 2, 5, 6)],
+  level = 0.95,
+  n.sims = 500,
+  which = "full",  # inclut effets aléatoires
+  include.resid.var = TRUE
+)
+
+count = 0
+not_in = c()
+for(i in 1:dim(pred)[1]){
+  if(observations$pourcentage_esca[-i_train][i] >= pred$lwr[i] & observations$pourcentage_esca[-i_train][i] <= pred$upr[i])
+    count = count + 1
+  else not_in = c(not_in, i)
+}
+count/dim(pred)[1]
+observations$pourcentage_esca[-i_train][not_in]
+```
+
+```{r}
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = dim(observations)[1]*0.8)
+model_lm <- glmer(y_normal~. + (1|cepage) + (1|region_viticole), data = observations[i_train ,-c(1, 2, 5, 6)])
+
+predict_train = predict(model_lm, observations[i_train ,-c(1, 2, 5, 6, 233)])
+predict_train = predict(bn, newdata = predict_train, inverse = TRUE)
+
+predict_test = predict(model_lm, observations[-i_train ,-c(1, 2, 5, 6, 233)])
+predict_test = predict(bn, newdata = predict_test, inverse = TRUE)
+
+print("RMSE train :")
+rmse(observations$pourcentage_esca[i_train], predict_train)
+print("Erreur moyenne absolue train :")
+mean(abs(observations$pourcentage_esca[i_train] - predict_train))
+print("RMSE test :")
+rmse(observations$pourcentage_esca[-i_train], predict_test)
+print("Erreur moyenne absolue test :")
+mean(abs(observations$pourcentage_esca[-i_train] - predict_test))
+
+plot(observations$pourcentage_esca[-i_train], abs(observations$pourcentage_esca[-i_train] - predict_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(observations$pourcentage_esca[-i_train], predict_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+```
+
+### Intervalle de prédiction à 95 % :
+
+```{r}
+varnames <- colnames(observations[i_train ,-c(1, 2, 5, 6, 3, 7)])  # enlever la variable réponse et les effets aléatoires
+formula_str <- paste("pourcentage_esca ~", paste(varnames, collapse = " + "), "+ (1 | cepage)" , "+ (1 | region_viticole)")
+form <- as.formula(formula_str)
+
+model_lm <- glmer(form, data = observations)
+
+new <- observations[-i_train, -c(1, 2, 5, 6)]
+# predict function for bootstrapping
+predfn <- function(fit) {
+  predict(fit, newdata=new, re.form=NULL)
+}
+
+# summarise output of bootstrapping
+sumBoot <- function(merBoot) {
+  return(
+    data.frame(#fit = apply(merBoot$t, 2, function(x) as.numeric(quantile(x, probs=.5, na.rm=TRUE))),
+               lwr = apply(merBoot$t, 2, function(x) as.numeric(quantile(x, probs=.025, na.rm=TRUE))),
+               upr = apply(merBoot$t, 2, function(x) as.numeric(quantile(x, probs=.975, na.rm=TRUE)))
+    )
+  )
+}
+
+
+boot <- lme4::bootMer(model_lm, predfn, nsim=100, use.u=TRUE, type="parametric")
+
+# Application
+pred_intervals <- sumBoot(boot)
+
+count = 0
+
+for(i in 1:dim(pred_intervals)[1]){
+  if(observations$pourcentage_esca[-i_train][i] >= pred_intervals$lwr[i] & observations$pourcentage_esca[-i_train][i] <= pred_intervals$upr[i])
+    count = count + 1
+}
+count/dim(pred_intervals)[1]
+```
+
+
+
+### Régressions linéaires avec sélection de variables :
+
+Variables conservées :
+
+```{r}
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+corr_matrix <- cor(observations[ ,var_tt])
+# high_corr <- findCorrelation(corr_matrix, cutoff = 0.8, names = TRUE)
+
+
+score_var <- read.xlsx("../../data/resultats/r2_rmse_par_variable.xlsx")
+# score_var <- read.xlsx("../../data/resultats/r2_rmse_par_variable_20.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars <- var_tt
+to_rm <- c()
+for(var1 in vars){
+  if(!var1 %in% to_rm){
+    for(var2 in setdiff(vars, c(var1, to_rm))){
+      if(cor(observations[,var1], observations[,var2]) > 0.8){
+        if(score_var[score_var$variable == var1, "rmse"] > score_var[score_var$variable == var1, "rmse"]){
+          to_rm <- c(to_rm, var1)
+          break
+        }
+        to_rm <- c(to_rm, var2)
+      }
+    }
+  }
+}
+
+to_keep <- c("cepage", "region_viticole",setdiff(vars, to_rm))
+to_keep
+```
+
+
+
+
+
+
+
+
+```{r}
+# Essaie de réduction de dimension mais ne change rien
+# library(FactoMineR) # ACP
+# library(factoextra) # ACP
+# i_train = sample(1:dim(observations)[1], replace = FALSE, size = dim(observations)[1]*0.8)
+# X_train = observations[i_train, to_keep]
+# y_train = as.integer(observations[i_train, "pourcentage_esca"])
+# X_test = observations[-i_train, to_keep]
+# y_test = observations[-i_train, "pourcentage_esca"]
+# 
+# res.afdm<- FAMD(X_train, graph = FALSE, ncp = 20)
+# eig.val <- get_eigenvalue(res.afdm)
+# head(eig.val,20)
+# 
+# X_train = predict(res.afdm, X_train)$coord
+# X_test = predict(res.afdm, X_test)$coord
+```
+
+```{r}
+# library(brms)
+# train = cbind(X_train, y_train)
+# colnames(train)[1:20] <- c("d1","d2","d3","d4","d5","d6","d7","d8","d9","d10","d11","d12","d13","d14","d15","d16","d17","d18","d19","d20")
+# fixed_effects <- paste(colnames(train)[1:20], collapse = " + ")
+# form <- as.formula(paste("y_train ~", fixed_effects))
+# 
+# modele <- brm(
+#   formula = form,
+#   family = poisson(link = "log"),
+#   data = train,
+#   chains = 4, iter = 2000, cores = 4,
+#   save_model = "modele_stan_code.stan",
+#   file = "modele_fit"
+# )
+# 
+# colnames(X_test)[1:20] <- c("d1","d2","d3","d4","d5","d6","d7","d8","d9","d10","d11","d12","d13","d14","d15","d16","d17","d18","d19","d20")
+# y_pred = predict(modele, X_test)[,1]
+# 
+# print("RMSE :")
+# rmse(y_test, y_pred)
+# print("Erreur moyenne absolue :")
+# mean(abs(y_test - y_pred))
+```
+
+
+```{r}
+# train = data.frame(cbind(X_train, y_train))
+# test <- data.frame(X_test, y_train=NA)
+# train <- rbind(train, test)
+# colnames(train)[1:20] <- c("d1","d2","d3","d4","d5","d6","d7","d8","d9","d10","d11","d12","d13","d14","d15","d16","d17","d18","d19","d20")
+# fixed_effects <- paste(colnames(train)[1:20], collapse = " + ")
+# form <- as.formula(paste("y_train ~", fixed_effects))
+# library(INLA)
+# modele_inla = inla(form, data = as.data.frame(train),
+#             family = 'poisson',
+#             #Ntrials = tableau1$nombre_ceps_total,
+#             control.inla = list(int.strategy = "eb"),
+#             control.compute=list(config=TRUE,residuals=TRUE,return.marginals.predictor=TRUE, dic=TRUE, waic = TRUE))
+
+
+# y_pred = modele_inla$summary.fitted.values$mean[(length(y_train)+1):dim(train)[1]]
+# 
+# low = modele_inla$summary.fitted.values$`0.025quant`[(length(y_train)+1):dim(train)[1]]
+# high = modele_inla$summary.fitted.values$`0.975quant`[(length(y_train)+1):dim(train)[1]]
+# 
+# print("RMSE :")
+# rmse(y_test, y_pred)
+# print("Erreur moyenne absolue :")
+# mean(abs(y_test - y_pred))
+# 
+# count = 0
+# 
+# for(i in 1:length(low)){
+#   if(y_test[i] >= low[i] & y_test[i] <= high[i])
+#     count = count + 1
+# }
+# count/length(low)
+```
+
+#### Train / test :
+
+```{r}
+# glmer.nb
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = dim(observations)[1]*0.8)
+fixed_effects <- paste(setdiff(vars, to_rm), collapse = "|cepage) + (")
+fixed_effects <- paste0("(", fixed_effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, "+ (1|cepage) + (1|region_viticole)")) # essayer + (.|cepage)
+model_lm <- glmer(form, data = observations[i_train, c(to_keep, "pourcentage_esca")]) # , family = poisson(link = "log")
+print("RMSE train :")
+rmse(observations$pourcentage_esca[i_train], predict(model_lm, observations[i_train, to_keep]))
+print("Erreur moyenne absolue train :")
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_lm, observations[i_train, to_keep])))
+print("RMSE test :")
+rmse(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train, to_keep]))
+print("Erreur moyenne absolue test :")
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_lm, observations[-i_train, to_keep])))
+
+plot(observations$pourcentage_esca[-i_train], abs(observations$pourcentage_esca[-i_train] - predict(model_lm, observations[-i_train, to_keep])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables sleléctionnées")
+
+plot(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train ,to_keep]),
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables selctionnées")
+```
+
+### Sans train / test :
+
+```{r}
+model_lm <- lmer(pourcentage_esca~. + (1|cepage) + (1|region_viticole), data = observations[ , c(to_keep, "pourcentage_esca")]) # , family = poisson(link = "log")
+print("RMSE :")
+rmse(observations$pourcentage_esca, predict(model_lm, observations[, to_keep]))
+print("Erreur moyenne absolue :")
+mean(abs(observations$pourcentage_esca - predict(model_lm, observations[, to_keep])))
+```
+RMSE : ~+0.1/0.05 par rapport au glm complet.
+Erreur moyenne absolue : ~+0.05 par rapport au glm complet.
+
+### Train / test par an :
+
+```{r}
+rmses <- c()
+for(an in 2003:2023){
+  test = which(observations$annee == an)
+  train = which(observations$annee != an)
+  model_lm <- glmer(pourcentage_esca~. + (1|cepage) + (1|region_viticole), data = observations[train ,c(to_keep, "pourcentage_esca")])
+  rmses <- c(rmses, rmse(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train ,c(to_keep)])))
+}
+
+plot(2003:2023, rmses, main = "RMSE par année", xlab = "Année", type = "l")
+```
+
+#### Ajout non linéaire :
+ 
+Ajout d'effets aléatoires ou d'intéractions sur les variables où le lien avec l'incidence d'esca ne semble pas linéaire (cf : "8_xgb_python_var_tt.html")
+
+```{r}
+obs <- observations
+obs$age_10_15 <- 0
+obs$age_10_15[obs$age_parcelle_estime <= 15] <- 1
+
+obs$age_15_25 <- 0
+obs$age_15_25[obs$age_parcelle_estime > 15 & obs$age_parcelle_estime <= 25] <- 1
+
+obs$age_25_30 <- 0
+obs$age_25_30[obs$age_parcelle_estime > 25] <- 1
+
+obs$ftsw_sympt_inf_0_4 <- 0
+obs$ftsw_sympt_inf_0_4[obs$ftsw.symptomes <= 0.4] <- 1
+
+obs$ftsw_sympt_sup_0_4 <- 0
+obs$ftsw_sympt_sup_0_4[obs$ftsw.symptomes > 0.4] <- 1
+
+obs$et0_sympt_inf_4 <- 0
+obs$et0_sympt_inf_4[obs$et0.symptomes <= 4] <- 1
+
+obs$et0_sympt_sup_4 <- 0
+obs$et0_sympt_sup_4[obs$et0.symptomes > 4] <- 1
+```
+
+```{r}
+fixed_effects <- paste(to_keep[-c(1,2)], collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, "+ (1|cepage) + (1|region_viticole)",
+                         "+ age_parcelle_estime * age_10_15",
+                         "+ age_parcelle_estime * age_15_25",
+                         "+ age_parcelle_estime * age_25_30",
+                         "+ ftsw_sympt_inf_0_4 * ftsw.symptomes",
+                         "+ ftsw_sympt_sup_0_4 * ftsw.symptomes",
+                         "+ et0_sympt_inf_4 * et0.symptomes",
+                         "+ et0_sympt_sup_4 * et0.symptomes"
+                         ))
+
+# i_train = sample(1:dim(obs)[1], replace = FALSE, size = dim(obs)[1]*0.8)
+model_lm <- glmer(form, data = obs[i_train ,-c(1, 2, 6)]) 
+
+print("RMSE train :")
+rmse(obs$pourcentage_esca[i_train], predict(model_lm, obs[i_train ,-c(1, 2, 5, 6)]))
+print("Erreur moyenne absolue train :")
+mean(abs(obs$pourcentage_esca[i_train] - predict(model_lm, obs[i_train ,-c(1, 2, 5, 6)])))
+print("RMSE test :")
+rmse(obs$pourcentage_esca[-i_train], predict(model_lm, obs[-i_train ,-c(1, 2, 5, 6)]))
+print("Erreur moyenne absolue test :")
+mean(abs(obs$pourcentage_esca[-i_train] - predict(model_lm, obs[-i_train ,-c(1, 2, 5, 6)])))
+```
+
+Améliore un peu
+
+
+```{r}
+obs <- observations
+obs$age <- 0
+obs$age[obs$age_parcelle_estime > 15 & obs$age_parcelle_estime <= 25] <- 1
+obs$age[obs$age_parcelle_estime > 25] <- 2
+
+obs$ftsw_sympt_sup_0_4 <- 0
+obs$ftsw_sympt_sup_0_4[obs$ftsw.symptomes > 0.4] <- 1
+
+
+obs$et0_sympt_sup_4 <- 0
+obs$et0_sympt_sup_4[obs$et0.symptomes > 4] <- 1
+```
+
+
+```{r}
+fixed_effects <- paste(to_keep[-c(1,2)], collapse = " + ")
+form <- as.formula(paste("pourcentage_esca ~", fixed_effects, " + (1|cepage) + (1|region_viticole) + (1|age) + (1|ftsw_sympt_sup_0_4) + (1|et0_sympt_sup_4)"))
+
+#i_train = sample(1:dim(obs)[1], replace = FALSE, size = dim(obs)[1]*0.8)
+model_lm <- glmer(form, data = obs[i_train ,-c(1, 2, 6)]) 
+
+print("RMSE train :")
+rmse(obs$pourcentage_esca[i_train], predict(model_lm, obs[i_train ,-c(1, 2, 5, 6)]))
+print("Erreur moyenne absolue train :")
+mean(abs(obs$pourcentage_esca[i_train] - predict(model_lm, obs[i_train ,-c(1, 2, 5, 6)])))
+print("RMSE test :")
+rmse(obs$pourcentage_esca[-i_train], predict(model_lm, obs[-i_train ,-c(1, 2, 5, 6)]))
+print("Erreur moyenne absolue test :")
+mean(abs(obs$pourcentage_esca[-i_train] - predict(model_lm, obs[-i_train ,-c(1, 2, 5, 6)])))
+```
+
+Améliore mais un peu moins
+
+
+
+#### Intervalles de prédictions
+
+```{r}
+library(merTools)
+pred <- predictInterval(
+  merMod = model_lm,
+  newdata = observations[-i_train, to_keep],
+  level = 0.95,
+  n.sims = 500,
+  which = "full",  # inclut effets aléatoires
+  include.resid.var = TRUE
+)
+
+count = 0
+not_in = c()
+for(i in 1:dim(pred)[1]){
+  if(observations$pourcentage_esca[-i_train][i] >= pred$lwr[i] & observations$pourcentage_esca[-i_train][i] <= pred$upr[i])
+    count = count + 1
+  else not_in = c(not_in, i)
+}
+count/dim(pred)[1]
+observations$pourcentage_esca[-i_train][not_in]
+```
+
+
+#### Distribution de Poisson :
+
+```{r, cache=TRUE}
+# Beaucoup trop long / Infini
+model_lm <- glmer(pourcentage_esca~. + (1|cepage) + (1|region_viticole), data = observations[i_train, c(to_keep, "pourcentage_esca")], family = poisson(link = "log"))
+print("RMSE train :")
+rmse(observations$pourcentage_esca[i_train], predict(model_lm, observations[i_train, to_keep]))
+print("Erreur moyenne absolue train :")
+mean(abs(observations$pourcentage_esca[i_train] - predict(model_lm, observations[i_train, to_keep])))
+print("RMSE test :")
+rmse(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train, to_keep]))
+print("Erreur moyenne absolue test :")
+mean(abs(observations$pourcentage_esca[-i_train] - predict(model_lm, observations[-i_train, to_keep])))
+
+plot(observations$pourcentage_esca[-i_train], abs(observations$pourcentage_esca[-i_train] - predict(model_lm, observations[-i_train, to_keep])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm toutes variables")
+
+plot(observations$pourcentage_esca[-i_train], predict(model_lm, observations[-i_train ,-c(1, 2, 5, 6)]),
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm toutes variables")
+```
+
+### Catégories d'incidence d'esca
+
+Essai d'un modèle de classification de classe d'incidence :
+
+```{r}
+observations$esca_categoriel <- "[0;1["
+observations[observations$pourcentage_esca >= 1,]$esca_categoriel <- "[1;2["
+observations[observations$pourcentage_esca >= 2,]$esca_categoriel <- "[2;5["
+observations[observations$pourcentage_esca >= 5,]$esca_categoriel <- "[5;10["
+observations[observations$pourcentage_esca >= 10,]$esca_categoriel <- "[10;20["
+observations[observations$pourcentage_esca >= 20,]$esca_categoriel <- "[20;100["
+observations$esca_categoriel <- factor(observations$esca_categoriel, levels = c("[0;1[", "[1;2[", "[2;5[", "[5;10[", "[10;20[", "[20;100["))
+
+# observations$esca_categoriel <- "[0;1["
+# observations[observations$pourcentage_esca >= 20,]$esca_categoriel <- "[20;100["
+# observations$esca_categoriel <- factor(observations$esca_categoriel, levels = c("[0;1[", "[20;100["))
+```
+
+
+
+### Train / test
+Trop long
+
+```{r}
+# library(brms)
+# model_cat <- brm(formula = esca_categoriel~. + (1|cepage) + (1|region_viticole), data = observations[i_train ,-c(1, 2, 5, 6)], family = categorical())
+# print("Accuracy train : ")
+# pred_train <- round(predict(model_cat, observations[i_train ,-c(1, 2, 5, 6, 233)]),0)
+# table(pred_train == observations$esca_categoriel[i_train])[1]/ length(i_train)
+# print("Train : Table des correspondances (prédictions / réelles)")
+# table(pred_train, observations$esca_categoriel[i_train])
+# 
+# print("Accuracy train : ")
+# pred_test <- predict(model_cat, observations[-i_train ,-c(1, 2, 5, 6, 233)])
+# table(pred_test == observations$esca_categoriel[-i_train])[1]/ length(pred_test)
+# print("Test : Table des correspondances (prédictions / réelles)")
+# table(pred_test, observations$esca_categoriel[-i_train])
+```
+
+
+
+### Prédire incidence >= 20 :
+
+Essai d'un modèle de classification binaire : incidence supéreur ou égale à 20, ou non :
+
+#### Train / test
+
+```{r}
+observations$sup_20 <- as.factor(as.numeric((observations$pourcentage_esca >= 20)))
+
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = dim(observations)[1]*0.8)
+train_data <- observations[i_train,]
+test_data <- observations[-i_train,]
+
+# Augmenter le nombre de > 20 :
+idx = sample(x = which(train_data$sup_20 == 1), size = 4000, replace = TRUE)
+train_data = rbind(train_data, train_data[idx,])
+
+idx = sample(x = which(test_data$sup_20 == 1), size = 4000, replace = TRUE)
+test_data = rbind(test_data, test_data[idx,])
+```
+
+
+```{r}
+fixed_effects <- paste(to_keep, collapse = " + ")
+form <- as.formula(paste("sup_20 ~", fixed_effects, "+ (1|cepage) + (1|region_viticole)"))
+train_data <- train_data[, c(to_keep, "sup_20")]
+test_data <- test_data[, c(to_keep, "sup_20")]
+
+model_bin <- glmer(formula = form, data = train_data, family = binomial(link = "logit")) # Avec toutes les variables = prédit parfaitement askip
+print("Accuracy train : ")
+pred_train <- round(predict(model_bin, train_data[,to_keep], type = "response"),0)
+table(pred_train == train_data$sup_20)[1]/ length(i_train)
+print("Train : Table des correspondances (prédictions / réelles)")
+table(pred_train, train_data$sup_20)
+
+# print("Accuracy train : ")
+pred_test <- round(predict(model_bin, test_data[,to_keep], type = "response"),0)
+# table(pred_test == test_data$sup_20)[1]/ length(pred_test)
+print("Test : Table des correspondances (prédictions / réelles)")
+table(pred_test, test_data$sup_20)
+# NUUUUUUUUUUUUUUUUULLL
+```
+
+```{r}
+observations$sup_15 <- as.factor(as.numeric((observations$pourcentage_esca >= 15)))
+
+i_train = sample(1:dim(observations)[1], replace = FALSE, size = dim(observations)[1]*0.8)
+train_data <- observations[i_train,]
+test_data <- observations[-i_train,]
+
+# Augmenter le nombre de > 15 :
+idx = sample(x = which(train_data$sup_15 == 1), size = 4000, replace = TRUE)
+train_data = rbind(train_data, train_data[idx,])
+
+idx = sample(x = which(test_data$sup_15 == 1), size = 4000, replace = TRUE)
+test_data = rbind(test_data, test_data[idx,])
+```
+
+```{r}
+fixed_effects <- paste(to_keep, collapse = " + ")
+form <- as.formula(paste("sup_15 ~", fixed_effects, "+ (1|cepage) + (1|region_viticole)"))
+train_data <- sup_15_augmented[i_train, c(to_keep, "sup_15")]
+test_data <- sup_15_augmented[-i_train, c(to_keep, "sup_15")]
+
+model_bin_15 <- glmer(formula = form, data = train_data, family = binomial(link = "logit")) 
+
+print("Accuracy train : ")
+pred_train <- round(predict(model_bin_15, train_data[, to_keep], type = "response"),0)
+table(pred_train == train_data$sup_15)[1]/ length(i_train)
+print("Train : Table des correspondances (prédictions / réelles)")
+table(pred_train, train_data$sup_15)
+# pred_train    0    1
+#          0 3165  548
+#          1  918 2960
+
+# print("Accuracy train : ")
+pred_test <- round(predict(model_bin_15, test_data[, to_keep], type = "response"),0)
+# table(pred_test == test_data$sup_15)[1]/ length(pred_test)
+print("Test : Table des correspondances (prédictions / réelles)")
+table(pred_test, test_data$sup_15)
+# NUUUUUUUUUUUUUUUL
+```
+
+
+### Modèle linéaire sur uniquement esca >=20 :
+
+On ne peut pas tester avec toutes les variables car alors le nombre de variables serait supérieur au nombre d'observations.
+
+#### Train / test :
+
+```{r}
+i_train = sample(1:dim(obs_20)[1], replace = FALSE, size = dim(obs_20)[1]*0.8)
+var_desc <- c("cepage", "region_viticole", "age_parcelle_estime", "et0.symptomes", "RU", "ftsw.dormance", "swi.dormance", "auc_isv.symptomes", "tv.deb_end")
+# var_desc <- to_keep
+model_lm <- glmer(pourcentage_esca~. + (1|cepage) + (1|region_viticole), data = obs_20[i_train, c("pourcentage_esca", var_desc)]) 
+print("RMSE train :")
+rmse(obs_20$pourcentage_esca[i_train], predict(model_lm, obs_20[i_train, var_desc]))
+print("Erreur moyenne absolue train :")
+mean(abs(obs_20$pourcentage_esca[i_train] - predict(model_lm, obs_20[i_train, var_desc])))
+print("RMSE test :")
+rmse(obs_20$pourcentage_esca[-i_train], predict(model_lm, obs_20[-i_train, var_desc]))
+print("Erreur moyenne absolue test :")
+mean(abs(obs_20$pourcentage_esca[-i_train] - predict(model_lm, obs_20[-i_train, var_desc])))
+
+plot(obs_20$pourcentage_esca[-i_train], abs(obs_20$pourcentage_esca[-i_train] - predict(model_lm, obs_20[-i_train ,var_desc])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm uniquement incidence >= 20")
+
+plot(obs_20$pourcentage_esca[-i_train], predict(model_lm, obs_20[-i_train, var_desc]),
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm uniquement incidence >= 20")
+lines(0:50, 0:50, col="red")
+```

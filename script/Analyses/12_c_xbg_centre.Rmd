@@ -1,0 +1,280 @@
+---
+title: "XGB centré"
+author: "Gabriel Macé"
+date: "2025-07-07"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+```{r}
+library(reticulate)
+# Dis à R d’utiliser le bon environnement Python
+use_python("C:/Users/Lucas/AppData/Local/r-miniconda/envs/bayesenv/python.exe", required = TRUE)
+```
+
+```{python}
+# Importation des bibliothèques nécessaires
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split,cross_val_score
+import pyreadr
+```
+
+```{python}
+# Chargement des données
+observations = pyreadr.read_r("../../data/modelisation/observations_parcelles.RData")["observations"]
+observations = pd.DataFrame(observations)
+```
+
+### Préparation des données :
+
+```{python}
+var_an_pheno = list(observations.columns[13:48]) # ne pas garder la longueur de la période = 365 ou 366
+var_an = list(observations.columns[45:85]) # ne pas garder la longueur de la période
+var_dormance = list(observations.columns[86:122])
+var_deb_to_flo = list(set(observations.columns[123:159]) - set(["sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"]))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes = list(set(observations.columns[160:196]) - set(["sum.frost.days.0.symptomes"])) # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end = list(observations.columns[197:233])
+
+var_tt = var_an_pheno + var_an + var_dormance + var_deb_to_flo + var_symptomes + var_deb_to_end
+observations['cepage'] = observations['cepage'].astype('category')
+observations['region_viticole'] = observations['region_viticole'].astype('category')
+```
+
+```{python}
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+
+score_var = pd.read_excel("../../data/resultats/r2_rmse_par_variable.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars = var_tt + list(["age_parcelle_estime", "RU", "debourrement", "floraison" ])
+to_rm = []
+for var1 in vars:
+    if var1 not in to_rm:
+        for var2 in list(set(vars) - set([var1] + to_rm)):
+            corr = np.corrcoef(observations[var1], observations[var2])[0, 1]
+            if corr > 0.8:
+                rmse1 = score_var.loc[score_var["variable"] == var1, "rmse"].values[0]
+                rmse2 = score_var.loc[score_var["variable"] == var2, "rmse"].values[0]
+                if rmse1 > rmse2:
+                    to_rm.append(var1)
+                else:
+                    to_rm.append(var2)
+                break
+```
+
+```{python}
+# Division des données en ensemble d'apprentissage et de test
+train_ratio = 0.8
+
+# Trier les observations par année
+obs_sort = observations.sort_values(by="annee")
+
+# Initialisation des jeux
+train_parts = []
+test_parts = []
+
+# Regroupement par identifiant
+grouped = obs_sort.groupby("identifiant_parcelle_analyse")
+
+for _, group in grouped:
+    n = len(group)
+    group = group.reset_index(drop=True)  # pour un index de 0 à n-1
+    if n <= 5:
+        train_index, test_index = train_test_split(range(0,n), test_size=0.3) # int(np.ceil(n / 2))
+    else:
+        train_index, test_index = train_test_split(range(0,n), test_size=0.2) # int(np.floor(n * train_ratio))
+    
+    train_parts.append(group.iloc[train_index])
+    test_parts.append(group.iloc[test_index])
+
+# Concaténer les groupes pour obtenir les jeux complets
+train = pd.concat(train_parts).reset_index(drop=True)
+test = pd.concat(test_parts).reset_index(drop=True)
+```
+
+```{python}
+esca_parcelle = observations.groupby('identifiant_parcelle_analyse').agg({'pourcentage_esca': 'median'}).rename(columns={'pourcentage_esca': 'median_esca'})
+esca_parcelle.median_esca = round(esca_parcelle.median_esca)
+train = pd.merge(train, esca_parcelle, on = "identifiant_parcelle_analyse")
+train['pourcentage_esca'] = train["pourcentage_esca"] - train['median_esca']
+test = pd.merge(test, esca_parcelle, on = "identifiant_parcelle_analyse")
+test['pourcentage_esca'] = test["pourcentage_esca"] - test['median_esca']
+
+to_keep = list(["cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+
+X_train = pd.get_dummies(train[to_keep])
+X_test = pd.get_dummies(test[to_keep])
+
+y_train = train['pourcentage_esca']
+y_test = test['pourcentage_esca']
+```
+
+## XGBoost
+
+```{python}
+from xgboost import XGBRegressor
+```
+
+```{python}
+best_model = XGBRegressor(learning_rate = 0.1, max_depth = 9, n_estimators = 1000, objective = 'reg:absoluteerror')
+# quali : 4, 500
+best_model.fit(X_train, y_train)
+y_train_pred = best_model.predict(X_train)
+y_test_pred = best_model.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+
+## Processus Gaussiens
+
+```{python, eval = FALSE}
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import *
+# Préparation des données
+from sklearn.preprocessing import StandardScaler
+```
+
+```{python}
+# Division des données en ensemble d'apprentissage et de test
+train_ratio = 0.8
+
+# Trier les observations par année
+obs_sort = observations.sort_values(by="annee")
+
+# Initialisation des jeux
+train_parts = []
+test_parts = []
+
+# Regroupement par identifiant
+grouped = obs_sort.groupby("identifiant_parcelle_analyse")
+
+for _, group in grouped:
+    n = len(group)
+    group = group.reset_index(drop=True)  # pour un index de 0 à n-1
+    if n <= 5:
+        train_index, test_index = train_test_split(range(0,n), test_size=0.3) # int(np.ceil(n / 2))
+    else:
+        train_index, test_index = train_test_split(range(0,n), test_size=0.2) # int(np.floor(n * train_ratio))
+    
+    train_parts.append(group.iloc[train_index])
+    test_parts.append(group.iloc[test_index])
+
+# Concaténer les groupes pour obtenir les jeux complets
+train = pd.concat(train_parts).reset_index(drop=True)
+test = pd.concat(test_parts).reset_index(drop=True)
+```
+
+```{python}
+to_use = ["age_parcelle_estime", "et0.symptomes", "swi.symptomes", "sum.heat.days.35.symptomes", "rain.days.dormance", "sum.heat.days.30.dormance", "rr.deb_flo", "tv.deb_flo", "ftsw.symptomes", "auc_isv.deb_flo", "isv.deb_flo", "rr.symptomes", "rr.an", "sum.heat.days.25.deb_flo", "isv.sev.seq.10.symptomes", "sum.days.isv.mod_sev.dormance", "swi.dormance", "hu.dormance", "hu.symptomes", "RU", "VPD.symptomes", "tm.symptomes", "bh0.symptomes", "debourrement", "floraison"]
+
+# avant "RU" -> variables mises en avant par XGBoost / SHAP
+# "RU" et après : moi + modèle linéaire
+
+esca_parcelle = observations.groupby('identifiant_parcelle_analyse').agg({'pourcentage_esca': 'median'}).rename(columns={'pourcentage_esca': 'median_esca'})
+esca_parcelle.median_esca = round(esca_parcelle.median_esca)
+train = pd.merge(train, esca_parcelle, on = "identifiant_parcelle_analyse")
+train['pourcentage_esca'] = train["pourcentage_esca"] - train['median_esca']
+test = pd.merge(test, esca_parcelle, on = "identifiant_parcelle_analyse")
+test['pourcentage_esca'] = test["pourcentage_esca"] - test['median_esca']
+
+to_keep = list(["cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+
+to_keep = list(["cepage", "region_viticole"]) + to_use
+
+# to_keep = list(["cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+
+X_train = pd.get_dummies(train[to_keep])
+X_test = pd.get_dummies(test[to_keep])
+
+y_train = train['pourcentage_esca']
+y_test = test['pourcentage_esca']
+```
+
+```{python}
+from sklearn.decomposition import PCA
+pca = PCA(n_components=8)  # n_components= 4 
+X_train_pca = pd.DataFrame(pca.fit_transform(X_train))
+np.sum(pca.explained_variance_ratio_)
+
+X_test_pca = pd.DataFrame(pca.transform(X_test))
+X_train_pca = X_train_pca.rename(columns={0: "Dim_1", 1: "Dim_2", 2: "Dim_3", 3: "Dim_4", 4: "Dim_5", 5: "Dim_6", 6: "Dim_7", 7: "Dim_8"})
+X_test_pca = X_test_pca.rename(columns={0: "Dim_1", 1: "Dim_2", 2: "Dim_3", 3: "Dim_4", 4: "Dim_5", 5: "Dim_6", 6: "Dim_7", 7: "Dim_8"})
+```
+
+```{python, eval = FALSE}
+gpr_cv = GaussianProcessRegressor(kernel=Matern(),
+        random_state=0, normalize_y=True, alpha=0.5, n_restarts_optimizer=0).fit(X_train_pca, y_train)
+# normalize_y = True, 'alpha': 0.5, 'kernel': Matern(), Test r²: 0.07
+
+y_train_pred = gpr_cv.predict(X_train_pca, return_std=True)
+y_test_pred = gpr_cv.predict(X_test_pca, return_std=True)
+
+mean_prediction = y_test_pred[0]
+std_prediction =  y_test_pred[1]
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred[0])**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred[0])))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred[0])[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred[0])**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred[0])))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred[0])[0,1]**2)
+```
+
