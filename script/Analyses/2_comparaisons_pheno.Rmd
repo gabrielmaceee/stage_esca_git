@@ -1,0 +1,923 @@
+---
+title: "Exploration des simulations de stades phénologiques"
+author: "Gabriel Macé"
+date: "2025-03-31"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+## Objectifs :
+
+Nous allons ici faire plusieurs analyses :
+
+Tout d'abord, nous allons utiliser les données vit'adapt pour :
+
+-   Comparer la qualité des simulations de nos modèles de phénologie à des données réelles.
+
+-   Quantifier l'erreur que peut inclure les données SAFRAN par rapport à une station météo proche de la parcelle.
+
+-   Décrire les conséquences sur les différentes périodes d'intérêt.
+
+Puis, nous allons explorer et décrire les simulations de stades phénologiques faites sur nos couples mailles-cépages d'intérêt (données ESCA).
+
+```{r, include=FALSE}
+library(readxl)
+library(dplyr)
+library(Metrics) # Qualité des prédictions
+library(ggplot2)
+
+# Chargement des fonctions de phénologies
+source("../../R_functions/fonctions_pheno.R")
+
+```
+
+## Présentation des modèles :
+
+Pour simuler la date de débourrement nous utilisons le modèle SUWE : "Smoothed Utah Wang Engel".
+
+Ce modèle permet de simuler trois stades phénologiques : Le débourrement, la floraison et la veraison.
+
+L'idée de ce modèle est de cumuler les unités de chaleur de chaque jour jusqu'à atteindre un seuil, spécifique à chaque cépage. Le point de départ est ici le 213ème jour de l'année n-1. Pour chaque jour, plus on est proche d'une température optimale (ici 26.1 °C), plus la valeur de l'unité de chaleur est forte (de 0 à 1) :
+
+```{r}
+plot(we(TM = 0:40, Topt = 26.1), type = "l", xlab = "Température moyenne du jour", ylab = "Unité de chaleur", main = "Unité de chaleur en fonction de la température (Wang et Engel) : Débourrement", cex.main = 0.95)
+abline(v = 26.1, col = "red", lty = 2)
+```
+
+Le jour de débourrement est le jour où le cumul d'unité de chaleur dépasse le seuil du cépage.
+
+Ce modèle est calibré pour les cépages : "cabernet sauvignon", "chardonnay", "chasselas", "grenache","merlot", "monastrell","pinot noir", "riesling", "sauvignon blanc", "syrah","ugni blanc", "late ripening".
+
+Ces simulations de débourrement nous permettent aussi d'obtenir celles pour les cépages : "meunier", "chenin", "cabernet franc", "melon","gewurztraminer", "trousseau", "savagnin", "semillon", "pinot auxerrois", "gamay", "poulsard", "muscat de hambourg", "cinsault", "carignan", "mourvedre", "muscat petits grains", "niellucciu", "vermentinu", "fer servadou".
+
+Pour la floraison, nous avons deux solutions :
+
+-   Utiliser le modèle SUWE. Cette fois ci, le jour de départ est le jour d'après le débourrement, et la température optimale est de 29.34 °C :
+
+```{r}
+plot(we(TM = 0:40, Topt = 29.34), type = "l", xlab = "Température moyenne du jour", ylab = "Unité de chaleur", main = "Unité de chaleur en fonction de la température (Wang et Engel) : Floraison", cex.main = 0.95)
+abline(v = 29.34, col = "red", lty = 2)
+```
+
+Les cépages disponibles sont les 12 cépages sur lesquels le modèle SUWE est calibré.
+
+-   GFV : "Grapevine Flowering Veraison" : Ce modèle permet de simuler deux stades phénologiques : La floraison et la veraison. On ne s'intéressera ici qu'à la floraison. A partir d'une date fixe (le 60 ème jour de l'année / \~1er mars), et de données quotidiennes de températures, le modèle cumul les degrés jusqu'à atteindre un seuil spécifique à chaque cépage. Le jour de dépassement de ce seuil sera le jour de floraison prédit.
+
+Ce modèle est calibré pour tous les cépages suivants : "cabernet franc","cabernet sauvignon", "chardonnay","chasselas", "grenache", "merlot","pinot noir", "riesling", "sauvignon blanc", "syrah", "ugni blanc", "meunier", "aligote", "chenin","gewurztraminer", "trousseau", "savagnin", "semillon", "gamay", "poulsard", "muscat de hambourg", "cinsault", "carignan", "mourvedre", "muscat petits grains".
+
+(A voir Melon et Pinot Auxerrois)
+
+```{r}
+param_gfv = data.frame(cepage = c("cabernet franc","cabernet sauvignon", "chardonnay",
+              "chasselas", "grenache", "merlot","pinot noir",
+              "riesling", "sauvignon blanc", "syrah", "ugni blanc", "meunier", "aligote",
+              "chenin","gewurztraminer", "trousseau", "savagnin",
+              "semillon", "gamay", "poulsard", "muscat de hambourg",
+              "cinsault", "carignan", "mourvedre", "muscat petits grains"
+              ), fstar = c(1225,	1270,	1217,		
+                1274,	1269, 1266,	1219,
+                1242,	1238,	1277, 1376, 1120, 1227, 
+                1280, 1230, 1179, 1155,
+                1317, 1219, 1122, 1207,
+                1265, 1288, 1354, 1200
+                ))
+
+param_gfv %>% ggplot(aes(x = reorder(cepage, fstar), y = fstar)) + geom_point() +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Cépages", y = "Cumul de degré jour à atteindre",
+       title = "Cumul de degré jour à atteindre par cépage: GFV")
+```
+
+## I - Evaluation des modèles via les observations sur VitAdapt :
+
+Comparaison entre nos simulations et les obsevations réelles (observations vit'adapt).
+
+Nous allons simuler les floraisons de la parcelle grâce aux données de la station météo locale et à nos deux modèles (gfv et SUWE), afin de les comparer aux observations réélles.
+
+```{r}
+# Chargement des données vit'adapt
+data_pheno <- read_xlsx("../../data/vitadapt/DATA FLO.xlsx")[,c("année", "Id", "cepage", "DATE 50 ST", "DATE 50 JJ")]
+data_pheno$`DATE 50 JJ` <- as.numeric(data_pheno$`DATE 50 JJ`)
+data_pheno$`DATE 50 ST` <- as.numeric(data_pheno$`DATE 50 ST`)
+data_pheno <- drop_na(data_pheno)
+# mettre en minuscule le nom des cépages et supprimer les n et b 
+data_pheno$cepage <- substr(str_to_lower(data_pheno$cepage),1,nchar(data_pheno$cepage)-2)
+data_pheno$cepage <- str_replace(data_pheno$cepage, "-", " ")
+data_pheno[data_pheno$cepage == "sauvignon",]$cepage <- "sauvignon blanc"
+
+# On ne prend que les cépages qui nous intéressent :
+data_pheno <- data_pheno[data_pheno$cepage %in% c(debourrement.plant.grape$varieties, 
+                                            gfv.param.values$varieties,
+                                            SUWE.param.values$varieties,
+                                            floraison.ref) ,]
+
+
+data_pheno <- data_pheno %>% group_by(année, cepage) %>% 
+  summarise(date_st = mean(`DATE 50 ST`), date_jj = mean(`DATE 50 JJ`))
+
+
+# On fait pareil pour les données de 2017 à 2022 (avec le débourrement) :
+data_deb <- read_xlsx("../../data/vitadapt/DATA_DEB_vitadapt_2012_2023.xlsx")
+data_deb$`DATE_50_JJ_DEB` <- as.numeric(str_replace_all(data_deb$`DATE 50 JJ`, ",", "."))
+data_deb$`DATE_50_ST_DEB` <- as.numeric(str_replace_all(data_deb$`DATE 50 ST`, ",", "."))
+# data_deb$`DATE_50_JJ_FLO` <- as.numeric(str_replace_all(data_deb$`DATE_50_JJ_FLO`, ",", "."))
+# data_deb$`DATE_50_ST_FLO` <- as.numeric(str_replace_all(data_deb$`DATE_50_ST_FLO`, ",", "."))
+data_deb <- data_deb[!is.na(data_deb$DATE_50_JJ_DEB),]
+# mettre en minuscule le nom des cépages et supprimer les n et b 
+data_deb$cepage <- substr(str_to_lower(data_deb$cepage),1,nchar(data_deb$cepage)-2)
+data_deb$cepage <- str_replace(data_deb$cepage, "-", " ")
+data_deb[data_deb$cepage == "sauvignon",]$cepage <- "sauvignon blanc"
+data_deb <- data_deb[data_deb$cepage %in% c(debourrement.plant.grape$varieties, 
+                                            gfv.param.values$varieties,
+                                            SUWE.param.values$varieties,
+                                            floraison.ref) ,]
+data_deb <- data_deb %>% group_by(année, cepage) %>% 
+  summarise(date_st_deb = mean(`DATE_50_ST_DEB`), date_jj_deb = mean(`DATE_50_JJ_DEB`))
+
+data_pheno <- data_pheno %>% left_join(data_deb, by = c("année","cepage"))
+```
+
+```{r}
+# Chargement des données climatiques :
+climat <- read.csv("../../data/vitadapt/Station_Vitadapt_INRAE.csv", skip = 10, sep = ";")[,-8]
+climat$doy <- as.numeric(strftime(as.Date(with(climat,paste(AN, MOIS, JOUR, sep="-")),"%Y-%m-%d"), format = "%j")) # récuperer les jours juliens
+
+# On ne prends que les années utiles : 
+climat <- climat[climat$AN %in% 2011:2023,]
+
+# ! Il manque des infos le 12 et 13 décembre 2016 
+# -> ici je l'ai implémente en fonction des autres observations.
+# 13/12/2016 : TN proche de 9/12/2016 et 15/12/2016 -> moyenne TX : (9.8 + 13.8) /2 = 11.8
+climat[climat$AN == 2016 & climat$MOIS == 12 & climat$JOUR == 13, "TX"] <- 11.8
+climat[climat$AN == 2016 & climat$MOIS == 12 & climat$JOUR == 14, "TN"] <- 5.2 # Même tx que 12/12/2016
+
+```
+
+```{r}
+# Simulation des stades de phénologies : 
+# On agrége les simulations SUWE / gfv pour pouvoir faire un seul boxplot plus tard
+# On inclus aussi l'origine des données climatiques (climat) pour pouvoi ensuite les comparer aux prédictions via les données SAFRAN
+
+date_deb <- data.frame(cepage = NULL, year = NULL, fin_dormance = NULL, debourrement = NULL)
+date_flo <- data.frame(cepage = NULL, year = NULL, floraison = NULL, modele_flo = NULL, climat = NULL)
+for(cepage in unique(data_pheno$cepage)){
+  deb = debourrement(cepage = cepage, tn = climat$TN, tx = climat$TX, doy = climat$doy, year = climat$AN)
+  date_deb <- rbind(date_deb, data.frame(cepage = cepage, year = deb$year, fin_dormance = deb$fin_dormance, debourrement = deb$debourrement_SUWE))
+  flo = floraison(cepage = cepage, tn = climat$TN, tx = climat$TX, doy = climat$doy, year = climat$AN)
+  date_flo <- rbind(date_flo, data.frame(
+    cepage = cepage, year = flo$year, floraison = c(flo$flo_gfv, flo$flo_SUWE), modele_flo = c(rep("gfv", length(flo$flo_gfv)), rep("SUWE", length(flo$flo_SUWE))) , climat = "Station" ))
+}
+
+data_pheno <- data_pheno %>% left_join(date_flo, by = c("année" = "year", "cepage" = "cepage"))
+data_pheno <- data_pheno %>% left_join(date_deb, by = c("année" = "year", "cepage" = "cepage"))
+```
+
+### Débourrement :
+
+```{r}
+# Récupération des simulations SUWE uniquement : 
+deb_SUWE <- data_pheno %>% filter(climat == "Station" & modele_flo == "SUWE" & !is.na(date_st_deb))
+# Pour récuperer le nombre de simulations par cépage :
+data_counts <- deb_SUWE %>%
+  group_by(cepage) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(deb_SUWE, aes(
+  x = reorder(cepage, debourrement-`date_jj_deb`), y = debourrement-`date_jj_deb`)) + 
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_boxplot() + 
+  geom_text(data = data_counts, aes(x = as.factor(cepage), y =  max(deb_SUWE$debourrement-deb_SUWE$`date_jj_deb`, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Cépages", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation SUWE des dates de débourrement par cépages")
+
+
+print(paste("rmse débourrement : ", round(rmse(deb_SUWE$debourrement, deb_SUWE$`date_jj_deb`),2)))
+print(paste("Moyenne de la valeur absolue des erreurs : ", round(mean(abs(deb_SUWE$debourrement-deb_SUWE$`date_jj_deb`)),2)))
+plot(density(deb_SUWE$debourrement-deb_SUWE$`date_jj_deb`), main = "Densité des erreurs de débourrement")
+abline(v=0, col = "red")
+
+
+# Pour récuperer le nombre de simulations par année :
+data_counts <- deb_SUWE %>%
+  group_by(année) %>%
+  summarise(n = n(), .groups = "drop")
+ggplot(deb_SUWE, aes(
+  x = as.factor(année), y = debourrement-`date_jj_deb`)) + 
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_boxplot() + 
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(deb_SUWE$debourrement-deb_SUWE$`date_jj_deb`, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Années", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation SUWE des dates de débourrement par année")
+
+# deb_SUWE %>% group_by(année) %>% summarise(mean = mean(date_jj_deb, na.rm = TRUE))
+```
+
+```{r, include=FALSE}
+degres_periode <- data.frame(cepage = NULL, year = NULL, to_dormance = NULL, to_debourrement = NULL, temps_dormance = NULL, temps_debourrement = NULL)
+
+for(cepage in SUWE.param.values$varieties){
+  for(year in 2012:2023){
+    try({
+      temp_dormance <- climat %>% filter(AN == year-1 & doy >= 213) %>%
+        mutate(TM = (TN + TX)/2) %>% pull(TM)
+      temp_dormance <- c(temp_dormance, climat %>% 
+                           filter(AN == year & doy < data_pheno[data_pheno$année==year & data_pheno$cepage == cepage,]$fin_dormance) %>%
+        mutate(TM = (TN + TX)/2) %>% pull(TM))
+      
+      temp_debourrement <- climat %>% filter(AN == year & doy >= data_pheno[data_pheno$année==year & data_pheno$cepage == cepage,]$fin_dormance & doy < data_pheno[data_pheno$année==year & data_pheno$cepage == cepage,]$debourrement) %>%
+        mutate(TM = (TN + TX)/2) %>% pull(TM)
+  
+      degres_periode <- rbind(degres_periode, data.frame(cepage = cepage, year = year, 
+                              to_dormance = sum(temp_dormance),
+                              to_debourrement = sum(temp_debourrement),
+                              temps_dormance = length(temp_dormance),
+                              temps_debourrement = length(temp_debourrement)
+                                                         ))}
+    )
+  }
+}
+```
+
+```{r}
+deb_SUWE %>%
+  ggplot( aes(x=année, y=debourrement-date_jj_deb, group=cepage, color=cepage)) +
+    geom_line() +
+  labs(x = "Années", y = "Erreurs de simulations", color = "Cépage", title = "Erreurs dans les simualtions de débourrements par année et par cépage")
+
+
+
+degres_cumul_an <- climat %>% filter(AN > 2011 & doy < 115) %>% 
+  group_by(AN) %>% summarise(degres_cumul_an = sum((TX + TN)/2))
+degres_cumul_an <- degres_cumul_an %>% left_join(climat %>% filter(AN < 2023 & doy > 213) %>% 
+  group_by(AN) %>% summarise(degres_cumul_an_n_1 = sum((TX + TN)/2))%>% mutate(AN = AN + 1))
+
+
+degres_cumul_an %>% ggplot(aes(x=AN, y=degres_cumul_an + degres_cumul_an_n_1)) +
+    geom_line() +
+  labs(x = "Années", y = "Degres cumulés", color = "Cépage", title = "Degrès cumulés sur la période de dormance")
+
+ggplot(data = deb_SUWE %>% group_by(année) %>% summarise(debourrement = mean(debourrement)), aes(x=année, y=debourrement)) +
+    geom_line() +
+  geom_line(data = deb_SUWE %>% group_by(année) %>% 
+  summarise(date_jj_deb = mean(date_jj_deb)), aes(x=année, y=date_jj_deb, color = "red")) +
+  labs(x = "Années", y = "Date de débourrement", title = "Débourrement moyen par année : réel (rouge) vs simulé (noir)")
+```
+
+Nous pouvons tout d'abord observer que le modèle SUWE commet beaucoup d'erreurs dans la prédiction des dates de débourrement, elles sont souvent aux alentour de 5 jours trop précoces. Notamment pour les années 2015 et 2022 où les observations réelles de débourrements sont très tardives.
+
+Pour 2015 : le débourrement observé est tardif alors que le cumul de degrès jours est moyen comparé aux autres, tout comme le débourrement prédit.
+
+Pour 2022 : le débourrement observé est tardif alors que le cumul de degrès jours le débourrement prédit sont faibles.
+
+Tous les cépages ont des plus grandes erreurs pour ces 2 années, les erreurs viennent donc du modèle ou du climat, mais pas d'un cépage en particulier.
+
+Enlever ces 2 années améliore évidemment la rmse mais ne permet pas d'obtenir une rmse comparable à celle obtenue pour la floraison, ça n'est pas très utile.
+
+Pour 4 cépages : mourvedre, riesling, cabernet sauvignon, et merlot, la prédiction de débourrement est régulièrement 10 jours trop tôt. Parmis ces 4, il n'y a que le mourvèdre qui n'est pas directement inclus dans le modèle SUWE. Les erreurs ne sont donc pas dûes aux cépages dont le débourrement est dépendant d'un autre cépage.
+
+Aussi, il faut noté que les observations de débourrement (réelles) varient beaucoup selon l'année pour un même cépage. Par exemple, pour le cabernet sauvignon on peut passer du 88eme jours de l'année en 2019, au 105eme en 2022, ce qui représente quand même un écart de 17 jours pour le même cépage.
+
+Hypothèses formulées avec Chloé Delmas :
+
+-> La calibration des paramètres du modèle est faite sur des données où chaque cépage est dans les régions où on le retrouve habituellement. Il y aurait une forme de sur-apprentissage : le modèle fonctionne très bien lorsque que le couple cépage / région est habituel, mais moins lorsque que ce n'est pas le cas, comme avec vitadapt. La plasticité des cépages selon la région n'est pas assez prise en compte.
+
+Aussi les années 2015 / 2022 peuvent être atypiques.
+
+Nous allons par la suite essayé de vérifier ces hypothèses en comparant les simulations de débourrement que nous venons de faire à celle que nous allons faire pour chaque parcelle de producteur (cf : "erreurs_debourrement.Rmd").
+
+### Floraison :
+
+#### Modèle GFV :
+
+Un individu = un cépage / an.
+
+```{r}
+# Récupération des simulations gfv uniquement : 
+flo_gfv <- data_pheno %>% filter(climat == "Station" & modele_flo == "gfv")
+# Pour récuperer le nombre de simulations par cépage :
+data_counts <- flo_gfv %>%
+  group_by(cepage) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(flo_gfv, aes(
+  x = reorder(cepage, floraison-`date_jj`), y = floraison-`date_jj`)) + 
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_boxplot() + 
+  geom_text(data = data_counts, aes(x = as.factor(cepage), y =  max(flo_gfv$floraison - flo_gfv$`date_jj`, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Cépages", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation GFV des floraisons par cépages")
+
+print(paste("rmse GFV : ", round(rmse(flo_gfv$`date_jj`, flo_gfv$floraison),2)))
+print(paste("Moyenne de la valeur absolue des erreurs : ", round(mean(abs(flo_gfv$`date_jj` - flo_gfv$floraison)),2)))
+plot(density(flo_gfv$`date_jj`- flo_gfv$floraison), main = "Densité des erreurs GFV")
+abline(v=0, col = "red")
+
+print("RMSE par cépages (GFV) :")
+for(cepage in unique(flo_gfv$cepage)){
+  print(paste0(cepage, " : ",
+               round(rmse(flo_gfv[flo_gfv$cepage == cepage,]$floraison,
+                          flo_gfv[flo_gfv$cepage == cepage,]$`date_jj`),2)))
+}
+
+data_counts <- flo_gfv %>%
+  group_by(année) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(flo_gfv, aes(
+  x = as.factor(année), y = floraison-`date_jj`)) + 
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_boxplot() + 
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(flo_gfv$floraison - flo_gfv$`date_jj`, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Années", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation GFV des floraisons par année")
+
+# flo_gfv %>% group_by(année) %>% summarise(mean = mean(date_jj, na.rm = TRUE))
+
+# deb_SUWE <- deb_SUWE %>% left_join(flo_gfv[, c("année", "cepage","date_jj")], 
+                                   # by = c("Annee" = "année", "cepage" = "cepage"))
+
+# mean(deb_SUWE$date_jj_flo - deb_SUWE$date_jj, na.rm = TRUE)
+# Voir pourquoi !=
+```
+
+Le modèle gfv commet des erreurs (rmse 3.48), majoritairement inférieures à 5 jours, mais qui peuvent aller jusqu'à 10 jours. Ces erreurs varient selon le cépage et l'année, et semble être normales et centrées en 0.
+
+#### Modèle SUWE :
+
+```{r}
+# Récupération des simulations SUWE uniquement :
+flo_SUWE <- data_pheno %>% filter(climat == "Station" & modele_flo == "SUWE" & !is.na(floraison))
+
+data_counts <- flo_SUWE %>%
+  group_by(cepage) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(flo_SUWE, aes(
+  x = reorder(cepage, floraison-`date_jj`), y = floraison-`date_jj`)) + 
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_boxplot() + 
+  geom_text(data = data_counts, aes(x = as.factor(cepage), y =  max(flo_SUWE$floraison -flo_SUWE$`date_jj`, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Cépages", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation SUWE des floraisons par cépages")
+
+
+print(paste("rmse SUWE : ", round(rmse(flo_SUWE$floraison, flo_SUWE$`date_jj`),2)))
+print(paste("Moyenne de la valeur absolue des erreurs : ", round(mean(abs(
+  flo_SUWE$floraison-flo_SUWE$`date_jj`)),2)))
+
+
+plot(density(
+  flo_SUWE$floraison-flo_SUWE$`date_jj`), 
+     main = "Densité des erreurs SUWE")
+abline(v=0, col = "red")
+
+print("RMSE par cépages (SUWE) :")
+for(cepage in unique(flo_SUWE$cepage)){
+  print(paste0(cepage, " : ",
+               round(rmse(flo_SUWE[flo_SUWE$cepage == cepage,]$floraison,
+                          flo_SUWE[flo_SUWE$cepage == cepage,]$`date_jj`),2)))
+}
+
+data_counts <- flo_SUWE %>%
+  group_by(année) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(flo_SUWE, aes(
+  x = as.factor(année), y = floraison-`date_jj`)) + 
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_boxplot() + 
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(flo_SUWE$floraison - flo_SUWE$`date_jj`, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Années", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation SUWE des floraisons par année")
+```
+
+Le modèle SUWE commet des erreurs (rmse 5.52) plus importantes que le modèle gfv. Cette différence semble surtout du à un biais systématique de - 5 jours (trop tôt) comme nous pouvons le voir via la densité des erreurs, car en terme de variabilité des erreurs, les deux modèles sont comparables.
+
+#### Comparaisons des deux modèles de floraisons :
+
+```{r}
+# Comparaison des deux modèles de floraison :
+plot(density(deb_SUWE$debourrement-deb_SUWE$`date_jj_deb`), main = "Densité des erreurs", col = "red", ylim=c(0,0.12))
+lines(density(flo_gfv$`date_jj`- flo_gfv$floraison), col = "blue")
+lines(density(flo_SUWE$floraison-flo_SUWE$`date_jj`), col = "green")
+abline(v=0, col = "black", lty=2)
+legend(x = "topleft", legend = c("Débourrement SUWE", "Floraison SUWE", "Floraison GFV"),
+       lty = 1, col = c("red", "green", "blue"), cex = 0.8)
+
+data_counts <- data_pheno %>%
+  filter(!is.na(floraison)) %>%
+  group_by(cepage) %>%
+  filter(n_distinct(modele_flo) == 2) %>% # Récuperer les floraisons simulées par les 2 modèles uniquement
+  ungroup() %>% group_by(cepage, modele_flo) %>% summarise(n = n(), .groups = "drop")
+
+
+data_pheno %>%
+  filter(!is.na(floraison)) %>%
+  group_by(cepage) %>%
+  filter(n_distinct(modele_flo) == 2) %>%
+  ungroup() %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = reorder(cepage, floraison-`date_jj`), y = floraison-`date_jj`, fill = modele_flo)) +
+  geom_text(data = data_counts, aes(x = cepage, y =  max(data_pheno$floraison - data_pheno$`date_jj`, na.rm = TRUE) + 2, label = n, fill = modele_flo), position = position_dodge(width = 0.75), size = 3) + 
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Cépages", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation des floraisons",
+       fill = "Modèle")
+```
+
+Nous pouvons constater que les deux modèles présentent des erreurs, qui varient selon le cépage et l'année.
+
+La rmse pour le modèle gfv est de 3.48, et elle est 5.52 de pour le modèle SUWE. Aussi, les erreurs dues au modèle gfv semblent normalement distribuées et centrées en 0, alors que le modèle SUWE semble présenter un vrai biais et prévoit des floraisons trop précoce avec des erreurs centrées en - 5 (5 jours trop tôt).
+
+#### Floraison SUWE avec débourrement observé :
+
+Pour savoir si le biais de 5 jours du modèle SUWE vient du débourrement, nous allons refaire les simulations de floraison via ce modèle mais cette fois en partant des débourrements observés sur la parcelle, donc sans les simulés :
+
+```{r}
+# Simulation du débourrement et de la floraison de la parcelle vitadapt : 
+date_flo_opt <- data.frame(cepage = NULL, year = NULL, floraison_SUWE = NULL, floraison_gfv = NULL)
+cepages = c("cabernet sauvignon", "chardonnay", "chasselas", "grenache", "merlot", "pinot noir", "riesling", "sauvignon blanc", "ugni blanc", "syrah")
+for(cepage in cepages){
+  deb_vitadapt <- data_deb[data_deb$cepage == cepage,]
+  flo = floraison(cepage = cepage, tn = climat$TN, tx = climat$TX, 
+                     doy = climat$doy, year = climat$AN, 
+                  date_debourrement = data.frame(year = deb_vitadapt$année, debourrement = deb_vitadapt$date_jj_deb))
+  date_flo_opt <- rbind(date_flo_opt, data.frame(cepage = cepage, year = flo$year, floraison_SUWE = flo$flo_SUWE, floraison_gfv = flo$flo_gfv))
+}
+date_flo_opt <- date_flo_opt %>% filter(year != 2011)
+date_flo_opt <- date_flo_opt %>% left_join(data_pheno[data_pheno$modele_flo == "SUWE",c("année", "cepage", "date_jj","date_jj_deb")], by = c("year"="année", "cepage"="cepage"))
+```
+
+```{r}
+# Récupération des simulations avec debourrement donné uniquement :
+flo_SUWE <- date_flo_opt %>% filter(!is.na(date_jj_deb))
+
+data_counts <- flo_SUWE %>%
+  group_by(cepage) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(flo_SUWE, aes(
+  x = reorder(cepage, floraison_SUWE-`date_jj`), y = floraison_SUWE-`date_jj`)) + 
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_boxplot() + 
+  geom_text(data = data_counts, aes(x = as.factor(cepage), y =  max(flo_SUWE$floraison_SUWE -flo_SUWE$`date_jj`, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Cépages", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation SUWE des floraisons par cépages")
+
+
+print(paste("rmse SUWE : ", round(rmse(flo_SUWE$floraison_SUWE, flo_SUWE$`date_jj`),2)))
+print(paste("Moyenne de la valeur absolue des erreurs : ", round(mean(abs(
+  flo_SUWE$floraison_SUWE-flo_SUWE$`date_jj`)),2)))
+
+
+plot(density(
+  flo_SUWE$floraison_SUWE-flo_SUWE$`date_jj`), 
+     main = "Densité des erreurs SUWE")
+abline(v=0, col = "red")
+
+print("RMSE par cépages (SUWE) :")
+for(cepage in unique(flo_SUWE$cepage)){
+  print(paste0(cepage, " : ",
+               round(rmse(flo_SUWE[flo_SUWE$cepage == cepage,]$floraison_SUWE,
+                          flo_SUWE[flo_SUWE$cepage == cepage,]$`date_jj`),2)))
+}
+
+data_counts <- flo_SUWE %>%
+  group_by(year) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(flo_SUWE, aes(
+  x = as.factor(year), y = floraison_SUWE-`date_jj`)) + 
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_boxplot() + 
+  geom_text(data = data_counts, aes(x = as.factor(year), y =  max(flo_SUWE$floraison_SUWE - flo_SUWE$`date_jj`, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Années", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation SUWE des floraisons par année")
+
+```
+
+Avec un débourrement observé la simulation SUWE de la floraison est centrée en 0, mais il y a une grande variabilité selon l'année, venant directement des dates de débourrement observées qui sont déjà très variables : Le biais de 4 à 5 jours trop tôt vient bien du débourrement, mais cela n'explique pas l'ensemble des erreurs.
+
+## II - Sensibilité des modèles à des données climatiques maillées (SAFRAN) :
+
+Nous allons maintenant essayer de quantifier l'erreur que peuvent amener les données climatiques SAFRAN dans nos modèles, par rapport à des données climatiques locales.
+
+Nous allons faire des simulations pour la même parcelle mais avec les données SAFRAN.
+
+```{r}
+# Récupération des données SAFRAN correspondant à la maille
+SAFRAN_pheno <- read.csv("../../data/climat/donnees_SAFRAN_vitadapt.csv")
+SAFRAN_pheno$doy <- as.numeric(strftime(as.Date(as.character(SAFRAN_pheno$DATE),"%Y%m%d"), format = "%j"))
+SAFRAN_pheno$year <- as.numeric(strftime(as.Date(as.character(SAFRAN_pheno$DATE),"%Y%m%d"), format = "%Y"))
+SAFRAN_pheno <- SAFRAN_pheno %>% filter(year %in% 2011:2023)
+```
+
+```{r}
+# Simulation des stades de phénologies : 
+date_flo <- data.frame(cepage = NULL, year = NULL, floraison = NULL, modele_flo = NULL, climat = NULL)
+date_deb <- data.frame(cepage = NULL, year = NULL, debourrement = NULL)
+for(cepage in unique(data_pheno$cepage)){
+  deb = debourrement(cepage = cepage, tn = SAFRAN_pheno$TINF_H_Q, tx = SAFRAN_pheno$TSUP_H_Q, 
+                     doy = SAFRAN_pheno$doy, year = SAFRAN_pheno$year)
+  flo = floraison(cepage = cepage, tn = SAFRAN_pheno$TINF_H_Q, tx = SAFRAN_pheno$TSUP_H_Q, 
+                     doy = SAFRAN_pheno$doy, year = SAFRAN_pheno$year)
+  date_flo <- rbind(date_flo, data.frame(
+    cepage = cepage, year = flo$year, floraison = c(flo$flo_gfv, flo$flo_SUWE), modele_flo = c(rep("gfv", length(flo$flo_gfv)), rep("SUWE", length(flo$flo_SUWE))) , climat = "SAFRAN" ))
+  date_deb <- rbind(date_deb, data.frame(cepage = cepage, year = deb$year, debourrement = deb$debourrement_SUWE))
+}
+
+### ! remplacer 1:4 par 1:5 ou 1:6 pour inclure les dates de débourrements 
+data_pheno <- rbind(data_pheno, data_pheno[,1:6] %>% distinct() %>% left_join(date_flo, by = c("année" = "year", "cepage" = "cepage")) %>% left_join(date_deb, by = c("année" = "year", "cepage" = "cepage")))
+```
+
+### Débourrement :
+
+```{r}
+# Récupération des simulations SUWE uniquement :
+deb <- data_pheno %>% filter(modele_flo == "SUWE", !is.na(debourrement), !is.na(date_jj_deb))
+
+print(paste("rmse (observations vs simulations SAFRAN) débourrement : ", round(rmse(deb[deb$climat == "SAFRAN",]$date_jj_deb, deb[deb$climat == "SAFRAN",]$debourrement),2)))
+print(paste("rmse (simulations stations vs simulations SAFRAN) : ", round(rmse(deb[deb$climat == "Station",]$debourrement, deb[deb$climat == "SAFRAN",]$debourrement),2)))
+print(paste("Moyenne des écarts (Station - SAFRAN) : ", round(mean(deb[deb$climat == "Station",]$debourrement -deb[deb$climat == "SAFRAN",]$debourrement),2)))
+plot(density(deb[deb$climat == "Station",]$debourrement -deb[deb$climat == "SAFRAN",]$debourrement), main = "Densité des écarts (station - SAFRAN)")
+abline(v=0, col = "red")
+
+
+data_counts <- deb %>%
+  group_by(cepage, climat) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = reorder(cepage, debourrement-`date_jj_deb`), y = debourrement-`date_jj_deb`, fill = climat)) +
+  geom_text(data = data_counts, aes(x = cepage, y =  max(deb$debourrement - deb$`date_jj_deb`, na.rm = TRUE) + 2, label = n, fill = climat), 
+            position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Cépages", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation des debourrements par cépage",
+       fill = "Données climat")
+
+
+data_counts <- deb %>%
+  group_by(année, climat) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb %>%
+  ggplot(aes(x = as.factor(année), y = debourrement - `date_jj_deb`, fill = climat)) +
+  geom_boxplot() +
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(deb$debourrement - deb$`date_jj_deb`, na.rm = TRUE) + 2, label = n, fill = climat), position = position_dodge(width = 0.75), size = 3) + 
+  theme(axis.text.x = element_text(angle = 90, size = 9))+ 
+  labs(x = "Années", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation des debourrements par an",
+       fill = "Données climat")
+
+plot(density(
+  deb[deb$climat == "SAFRAN" ,]$debourrement-deb$`date_jj_deb`), 
+     main = "Densité des erreurs SAFRAN")
+abline(v=0, col = "red")
+```
+
+### Floraison :
+
+#### Modèle GFV :
+
+```{r}
+# Récupération des simulations gfv uniquement :
+flo_gfv <- data_pheno %>% filter(modele_flo == "gfv")
+print(paste("rmse (observations vs simulations SAFRAN) GFV : ", round(rmse(flo_gfv[flo_gfv$climat == "SAFRAN",]$date_jj, flo_gfv[flo_gfv$climat == "SAFRAN",]$floraison),2)))
+print(paste("rmse (simulations stations vs simulations SAFRAN) GFV : ", round(rmse(flo_gfv[flo_gfv$climat == "Station",]$floraison, flo_gfv[flo_gfv$climat == "SAFRAN",]$floraison),2)))
+print(paste("Moyenne des écarts (Station - SAFRAN) : ", round(mean(flo_gfv[flo_gfv$climat == "Station",]$floraison -flo_gfv[flo_gfv$climat == "SAFRAN",]$floraison),2)))
+plot(density(flo_gfv[flo_gfv$climat == "Station",]$floraison -flo_gfv[flo_gfv$climat == "SAFRAN",]$floraison), main = "Densité des écarts (station - SAFRAN) GFV")
+abline(v=0, col = "red")
+
+data_counts <- flo_gfv %>%
+  group_by(cepage, climat) %>%
+  summarise(n = n(), .groups = "drop")
+
+flo_gfv %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = reorder(cepage, floraison-`date_jj`), y = floraison-`date_jj`, fill = climat)) +
+  geom_text(data = data_counts, aes(x = cepage, y =  max(flo_gfv$floraison - flo_gfv$`date_jj`, na.rm = TRUE) + 2, label = n, fill = climat), 
+            position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Cépages", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation des floraisons gfv par cépage",
+       fill = "Données climat")
+
+data_counts <- flo_gfv %>%
+  group_by(année, climat) %>%
+  summarise(n = n(), .groups = "drop")
+
+flo_gfv %>%
+  ggplot(aes(x = as.factor(année), y = floraison - `date_jj`, fill = climat)) +
+  geom_boxplot() +
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(flo_gfv$floraison - flo_gfv$`date_jj`, na.rm = TRUE) + 2, label = n, fill = climat), position = position_dodge(width = 0.75), size = 3) + 
+  theme(axis.text.x = element_text(angle = 90, size = 9))+ 
+  labs(x = "Années", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation des floraisons gfv par an",
+       fill = "Données climat")
+
+plot(density(
+  flo_gfv[flo_gfv$climat == "SAFRAN" ,]$floraison-flo_gfv$`date_jj`), 
+     main = "Densité des erreurs GFV SAFRAN")
+abline(v=0, col = "red")
+```
+
+#### Modèle SUWE :
+
+```{r}
+# Récupération des simulations SUWE uniquement :
+flo_SUWE <- data_pheno %>% filter(modele_flo == "SUWE", !is.na(floraison))
+
+print(paste("rmse (observations vs simulations SAFRAN) SUWE : ", round(rmse(flo_SUWE[flo_SUWE$climat == "SAFRAN",]$date_jj, flo_SUWE[flo_SUWE$climat == "SAFRAN",]$floraison),2)))
+print(paste("rmse (simulations stations vs simulations SAFRAN) SUWE : ", round(rmse(flo_SUWE[flo_SUWE$climat == "Station",]$floraison, flo_SUWE[flo_SUWE$climat == "SAFRAN",]$floraison),2)))
+print(paste("Moyenne des écarts (Station - SAFRAN) : ", round(mean(flo_SUWE[flo_SUWE$climat == "Station",]$floraison -flo_SUWE[flo_SUWE$climat == "SAFRAN",]$floraison),2)))
+plot(density(flo_SUWE[flo_SUWE$climat == "Station",]$floraison -flo_SUWE[flo_SUWE$climat == "SAFRAN",]$floraison), main = "Densité des écarts (station - SAFRAN) SUWE")
+abline(v=0, col = "red")
+
+data_counts <- flo_SUWE %>%
+  group_by(cepage, climat) %>%
+  summarise(n = n(), .groups = "drop")
+
+flo_SUWE %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = reorder(cepage, floraison-`date_jj`), y = floraison-`date_jj`, fill = climat)) +
+  geom_text(data = data_counts, aes(x = cepage, y =  max(flo_SUWE$floraison - flo_SUWE$`date_jj`, na.rm = TRUE) + 2, label = n, fill = climat), position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Cépages", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation des floraisons SUWE par cépage",
+       fill = "Données climat")
+
+data_counts <- flo_SUWE %>%
+  group_by(année, climat) %>%
+  summarise(n = n(), .groups = "drop")
+
+flo_SUWE %>%
+  ggplot(aes(x = as.factor(année), y = floraison - `date_jj`, fill = climat)) +
+  geom_boxplot() +
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(flo_SUWE$floraison - flo_SUWE$`date_jj`, na.rm = TRUE) + 2, label = n, fill = climat), 
+            position = position_dodge(width = 0.75), size = 3) + 
+  theme(axis.text.x = element_text(angle = 90, size = 9))+ 
+  labs(x = "Années", y = "Erreurs : Simulation - réelle",
+       title = "Erreurs dans la simulation des floraisons SUWE par an",
+       fill = "Données climat")
+
+
+plot(density(
+  flo_SUWE[flo_SUWE$climat == "SAFRAN" ,]$floraison-flo_SUWE$`date_jj`), 
+     main = "Densité des erreurs SUWE SAFRAN")
+abline(v=0, col = "red")
+```
+
+Peu importe le stade phénologique simulé et le modèle utilisé, les différences ne sont pas énormes, mais il y a une variabilité selon le cépage, et l'année. Les données climatiques issues de la station locale semblent engendrer des floraisons et des débourrements 1 à 2 jours plus précoces que via les données SAFRAN (plus de degrés jours via la station locale).
+
+Ducoup, les données SAFRAN augmente la RMSE (comparée à celle avec les données locales) pour le modèle GFV (3.7), mais la diminue pour SUWE (4.35) car les deux biais (SUWE et SAFRAN) ne sont pas dans le même sens.
+
+On peut faire les mêmes observations pour le débourrement.
+
+## III - Effet des modèles sur les 2 périodes :
+
+Nous allons à présent analyser l'effet des modèles et de l'origine des données climatiques sur les durées des périodes phénologiques simulées.
+
+### Dormance :
+
+Cette période allant du 1 septembre au jour de débourrement, s'interesser à sa durée revient à regarder les dates de débourrement, comme nous l'avons déja fait.
+
+```{r}
+# Récupération des simulations :
+deb_flo <- data_pheno %>% filter(!is.na(debourrement) & modele_flo == "SUWE")
+
+# Période 01/09 -> 31/13 = 122 jours
+
+data_counts <- deb_flo %>%
+  group_by(cepage, climat) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb_flo %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = reorder(cepage, debourrement), y = debourrement + 122, fill = climat)) +
+  geom_text(data = data_counts, aes(x = cepage, y =  max(deb_flo$debourrement, na.rm = TRUE) + 122 + 2, label = n), position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Cépages", y = "Durée de la période",
+       fill = "Données climat",
+       title = "Durée de la période de dormance par cépage, modèle SUWE")
+
+# Période 01/09 -> 31/13 = 122 jours
+
+data_counts <- deb_flo %>%
+  group_by(année, climat) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb_flo %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = as.factor(année), y = debourrement + 122, fill =  climat)) +
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(deb_flo$debourrement, na.rm = TRUE) + 122 + 2, label = n), position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Années", y = "Durée de la période",
+       fill = "Données climat",
+       title = "Durée de la période de dormance par année, modèle SUWE")
+```
+
+Comme observé précedemment, les données climatiques SAFRAN engendre un débourrement plus tardif.
+
+### Débourrement à floraison :
+
+Pour le modèle gfv, on se base sur la date de debourrement simulée par SUWE car c'est ce que l'on fera dans notre modélisation par la suite. Pour cette même raison, on ne prends en compte ici que les prédictions via les données SAFRAN :
+
+```{r}
+# Récupération des simulations :
+deb_flo <- data_pheno %>% filter(!is.na(floraison), cepage %in% SUWE.param.values$varieties, climat == "SAFRAN")
+
+data_counts <- deb_flo %>%
+  group_by(cepage, modele_flo) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb_flo %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = reorder(cepage, floraison - debourrement), y = floraison - debourrement, fill = modele_flo)) +
+  geom_text(data = data_counts, aes(x = cepage, y =  max(deb_flo$floraison - deb_flo$debourrement, na.rm = TRUE) + 2, label = n, fill = modele_flo), position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Cépages", y = "Durée de la période",
+       title = "Durée de la période débourrement - floraison par cépage et modèle de floraison",
+       fill = "Modèle")
+
+
+data_counts <- deb_flo %>%
+  group_by(année, modele_flo) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb_flo %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = as.factor(année), y = floraison - debourrement, fill = modele_flo)) +
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(deb_flo$floraison - deb_flo$debourrement, na.rm = TRUE) + 2, label = n, fill = modele_flo), position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Années", y = "Durée de la période",
+       title = "Durée de la période débourrement - floraison par année et modèle de floraison",
+       fill = "Modèle")
+```
+
+La période debourrement - floraison prédite via le modèle SUWE est plus courte que celle prédite par le modèle gfv, peu importe l'année et le cépage, car pour rappel le modèle SUWE prédit en général une floraions 4 à 5 jours trop précoce pour la parcelle vitadapt, alors que pour le modèle gfv l'erreur est centrée en 0.
+
+Il existe aussi une réelle variabilité de durée de période inter cépages, mais aussi inter annuelles.
+
+Nous allons à présent regarder la différence entre les durées des périodes simulées, et celle des périodes observées sur la parcelle vitadapt :
+
+```{r}
+# Récupération des simulations :
+deb_flo <- data_pheno %>% filter(!is.na(floraison), cepage %in% SUWE.param.values$varieties, climat == "SAFRAN")
+
+data_counts <- deb_flo %>%
+  group_by(cepage, modele_flo) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb_flo %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = reorder(cepage, ((floraison - debourrement)-(date_jj - date_jj_deb))), y = ((floraison - debourrement)-(date_jj - date_jj_deb)), fill = modele_flo)) +
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_text(data = data_counts, aes(x = cepage, y =  max(((deb_flo$floraison - deb_flo$debourrement)-(deb_flo$date_jj - deb_flo$date_jj_deb)), na.rm = TRUE) + 2, label = n, fill = modele_flo), position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Cépages", y = "Erreur : Simulation - réelle",
+       title = "Erreur sur la durée de la période débourrement - floraison",
+       fill = "Modèle")
+
+
+data_counts <- deb_flo %>%
+  group_by(année, modele_flo) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb_flo %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = as.factor(année), y = ((floraison - debourrement)-(date_jj - date_jj_deb)), fill = modele_flo)) +
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(((deb_flo$floraison - deb_flo$debourrement)-(deb_flo$date_jj - deb_flo$date_jj_deb)), na.rm = TRUE) + 2, label = n, fill = modele_flo), position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Année", y = "Erreur : Simulation - réelle",
+       title = "Erreur sur la durée de la période débourrement - floraison",
+       fill = "Modèle")
+
+# Mettre les erreurs gfv dans un data frame
+df_erreurs <- data.frame(erreur = with(deb_flo[deb_flo$modele_flo == "gfv",],
+                (floraison - debourrement) - (date_jj - date_jj_deb)))
+
+print(paste("rmse période gfv : ", round(sqrt(mean(df_erreurs$erreur^2, na.rm = TRUE)),2)))
+print(paste("Moyenne erreurs période gfv : ", round(mean(df_erreurs$erreur, na.rm = TRUE),2)))
+
+
+# Mettre les erreurs SUWE dans un data frame
+df_erreurs <- data.frame(erreur = with(deb_flo[deb_flo$modele_flo == "SUWE",],
+                (floraison - debourrement) - (date_jj - date_jj_deb)))
+
+print(paste("rmse période SUWE : ", round(sqrt(mean(df_erreurs$erreur^2, na.rm = TRUE)),2)))
+print(paste("Moyenne période erreurs SUWE : ", round(mean(df_erreurs$erreur, na.rm = TRUE),2)))
+
+```
+
+Nous pouvons observer que pour les cépages où l'erreur sur la date de débourrement est la plus forte, sont aussi ceux avec le plus grand écart entre la durée de la période simulée et celle observée.
+
+Aussi, les erreurs sont plus importantes pour le modèle gfv : Ici, nous prenons la date de débourrement du modèle SUWE, or le modèle gfv se base sur une date fixe : le 1er mars. Les durées seront donc ici plus longue pour le modèle gfv.
+
+Aussi, le fait que les prédictions du modèle SUWE soit trop précoces pour le débourrement et la floraison se compense en partie ici, la durée de la période est assez bien simulées pour une partie des cépages.
+
+### Période de symptôme :
+
+La durée de la période d'observation des symptômes d'ESCA (floraison-31 août) dépend uniquement de la date de floraison.
+
+(31 août = 243 ou 244 ème jours, on prendra 243 ici).
+
+```{r}
+# Récupération des simulations :
+deb_flo <- data_pheno %>% filter(!is.na(floraison), cepage %in% SUWE.param.values$varieties, climat == "SAFRAN")
+
+data_counts <- deb_flo %>%
+  group_by(cepage, modele_flo) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb_flo %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = reorder(cepage, 243 - floraison), y = 243 - floraison, fill = modele_flo)) +
+  geom_text(data = data_counts, aes(x = cepage, y =  max(243 - deb_flo$floraison, na.rm = TRUE) + 2, label = n, fill = modele_flo), position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Cépages", y = "Durée de la période",
+       title = "Durée de la période d'observation des symptômes par cépage et modèle de floraison",
+       fill = "Modèle")
+
+
+data_counts <- deb_flo %>%
+  group_by(année, modele_flo) %>%
+  summarise(n = n(), .groups = "drop")
+
+deb_flo %>%
+  ggplot() + 
+  geom_boxplot(aes(
+    x = as.factor(année), y = 243 - floraison, fill = modele_flo)) +
+  geom_text(data = data_counts, aes(x = as.factor(année), y =  max(243 - deb_flo$floraison, na.rm = TRUE) + 2, label = n, fill = modele_flo), position = position_dodge(width = 0.75), size = 3) +
+  theme(axis.text.x = element_text(angle = 90, size = 9)) + 
+  labs(x = "Années", y = "Durée de la période",
+       title = "Durée de la période d'observation des symptômes par années et modèle de floraison",
+       fill = "Modèle")
+```
+
+Comme observé précedemment, le modèle SUWE engendre une floraison plus précoce, donc la période floraison - 31 août est plus longue avec ce modèle qu'avec le modèle gfv.
+
+On a vu que les données climatiques SAFRAN engendre une phénologie plus tardive (un peu plus d'un jours), pour le débourrement comme la floraison. Donc la période de dormance est un jour plus longue avec les données SAFRAN, on observe la même durée de période débourrement - floraison, et la période d'observation des symptômes sera un jour plus courte avec les donnés climatiques SAFRAN qu'avec les données climatiques observées de la parcelle vitadapt.
+

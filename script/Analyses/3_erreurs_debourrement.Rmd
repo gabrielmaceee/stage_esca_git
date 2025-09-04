@@ -1,0 +1,391 @@
+---
+title: "Erreurs simulations débourrement SUWE"
+author: "Gabriel Macé"
+date: "2025-03-31"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    
+---
+
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+## Objectifs : 
+
+Suite aux erreurs constatées lors de la simulation des dates de débourrements de la parcelles vitadapt, nous avons émis les hypothèses que :
+
+La calibration des paramètres du modèle SUWE est faite sur des données où chaque cépage est dans les régions où on le retrouve habituellement. Il y aurait une forme de sur-apprentissage : le modèle fonctionne très bien lorsque que le couple cépage / région est habituel, mais moins lorsque que ce n'est pas le cas, comme avec vitadapt.
+La plasticité des cépages selon la région n'est pas assez prise en compte.
+
+Aussi les années 2015 / 2022 peuvent être atypiques.
+
+Le but ici est vérifier ces hypothèses en comparant les simulations de débourrement via la maille SAFRAN correspondant à la station vitadapt à celle que nous allons faire pour chaque parcelle de producteur.
+
+Nous pourrons pas vraiment ici valider notre première hypothèse car il faudrait avoir les observations de phénologies des "parcelles producteurs". Mais nous pouvons la rejeter, elle serait fausse si les simulations de stade phénologique sur la parcelle vitadapt sont proches de celle sur les autres parcelles.
+
+Si l'ensemble simulations sur les années 2015 et 2022 sont atypiques, alors ces années peuvent les autres sur l'ensemble de nos parcelles, sinon elles peuvent l'être uniquement sur la parcelle viadapt.
+
+Pour s'assurer de dépendre uniquement du modèle SUWE, nous prendrons que les 12 cépages directement simulables.
+
+Pour garder une cohérence dans les comparaisons, toutes les simulations sont faites à partir de donénes SAFRAN.
+
+```{r}
+library(readxl)
+library(dplyr)
+library(Metrics) # Qualité des prédictions
+library(ggplot2)
+
+# Chargement des fonctions de phénologies
+source("../../R_functions/fonctions_pheno.R")
+```
+
+## Simulations toutes France : 
+
+```{r}
+# Récupération et modifications des couples mailles / cépages / jours sur lesquels simulés
+load(file = "../../data/climat/climat_maille_cepage_jour_complet.RData")
+complet <- complet %>% filter(cepage %in% SUWE.param.values$varieties)
+complet$doy <- as.numeric(strftime(as.Date(as.character(complet$DATE),"%Y%m%d"), 
+                                   format = "%j"))
+complet$year <- as.numeric(strftime(as.Date(as.character(complet$DATE),"%Y%m%d"), format = "%Y"))
+complet <- complet %>% filter(year %in% 2011:2023)
+```
+
+```{r}
+# Simulation des dates de débourrement et de floraison pour nos mailles :
+date_debourrement <- data.frame(maille = NULL, cepage = NULL, year = NULL, debourrement_SUWE = NULL)
+date_floraison <- data.frame(maille = NULL, cepage = NULL, year = NULL, flo_SUWE = NULL, flo_gfv = NULL)
+for(maille in unique(complet$ID_MAILLE)){ # Pour chaque maille
+  for(cepage in unique(complet[complet$ID_MAILLE == maille,]$cepage)){ # Pour chaque cépage dans la maille
+    data <- complet[complet$ID_MAILLE == maille & complet$cepage == cepage ,] # Données correspondantes
+    deb <- debourrement(cepage = cepage, tn = data$TINF_H_Q, tx = data$TSUP_H_Q, doy = data$doy, 
+                      year = data$year)
+    date_debourrement <- rbind(date_debourrement, data.frame(maille = maille, cepage = cepage, 
+                                year = deb$year, debourrement_SUWE = deb$debourrement_SUWE))
+    flo <- floraison(cepage = cepage, tn = data$TINF_H_Q, tx = data$TSUP_H_Q, doy = data$doy, 
+                      year = data$year)
+    date_floraison <- rbind(date_floraison, data.frame(maille = maille, cepage = cepage, 
+                                year = flo$year, flo_SUWE = flo$flo_SUWE, flo_gfv = flo$flo_gfv))
+  }
+}
+date_floraison <- date_floraison %>% filter(year != 2011)
+```
+
+## Simulation parcelle vitadapt :
+
+```{r}
+# Récupération des données SAFRAN correspondant à la maille
+SAFRAN_pheno <- read.csv("../../data/climat/donnees_SAFRAN_vitadapt.csv")
+SAFRAN_pheno$doy <- as.numeric(strftime(as.Date(as.character(SAFRAN_pheno$DATE),"%Y%m%d"), format = "%j"))
+SAFRAN_pheno$year <- as.numeric(strftime(as.Date(as.character(SAFRAN_pheno$DATE),"%Y%m%d"), format = "%Y"))
+SAFRAN_pheno <- SAFRAN_pheno %>% filter(year %in% 2011:2023)
+```
+
+```{r}
+# Simulation du débourrement et de la floraison de la parcelle vitadapt : 
+date_deb_vitadapt <- data.frame(cepage = NULL, year = NULL, debourrement = NULL)
+date_flo_vitadapt <- data.frame(cepage = NULL, year = NULL, floraison_SUWE = NULL, floraison_gfv = NULL)
+for(cepage in unique(date_debourrement$cepage)){
+  deb = debourrement(cepage = cepage, tn = SAFRAN_pheno$TINF_H_Q, tx = SAFRAN_pheno$TSUP_H_Q, 
+                     doy = SAFRAN_pheno$doy, year = SAFRAN_pheno$year)
+  date_deb_vitadapt <- rbind(date_deb_vitadapt, data.frame(cepage = cepage, year = deb$year, debourrement = deb$debourrement_SUWE))
+  flo = floraison(cepage = cepage, tn = SAFRAN_pheno$TINF_H_Q, tx = SAFRAN_pheno$TSUP_H_Q, 
+                     doy = SAFRAN_pheno$doy, year = SAFRAN_pheno$year)
+  date_flo_vitadapt <- rbind(date_flo_vitadapt, data.frame(cepage = cepage, year = flo$year, floraison_SUWE = flo$flo_SUWE, floraison_gfv = flo$flo_gfv))
+}
+date_flo_vitadapt <- date_flo_vitadapt %>% filter(year != 2011)
+```
+
+
+## Récupération données vitadapt :
+
+```{r}
+# Chargement des données vit'adapt
+data_pheno <- read_xlsx("../../data/vitadapt/DATA FLO.xlsx")[,c("année", "Id", "cepage", "DATE 50 ST", "DATE 50 JJ")]
+data_pheno$`DATE 50 JJ` <- as.numeric(data_pheno$`DATE 50 JJ`)
+data_pheno$`DATE 50 ST` <- as.numeric(data_pheno$`DATE 50 ST`)
+data_pheno <- drop_na(data_pheno)
+# mettre en minuscule le nom des cépages et supprimer les n et b 
+data_pheno$cepage <- substr(str_to_lower(data_pheno$cepage),1,nchar(data_pheno$cepage)-2)
+data_pheno$cepage <- str_replace(data_pheno$cepage, "-", " ")
+data_pheno[data_pheno$cepage == "sauvignon",]$cepage <- "sauvignon blanc"
+
+# On ne prend que les cépages qui nous intéressent :
+data_pheno <- data_pheno[data_pheno$cepage %in% c(debourrement.plant.grape$varieties, 
+                                            gfv.param.values$varieties,
+                                            SUWE.param.values$varieties,
+                                            floraison.ref) ,]
+
+
+data_pheno <- data_pheno %>% group_by(année, cepage) %>% 
+  summarise(date_st = mean(`DATE 50 ST`), date_jj = mean(`DATE 50 JJ`))
+
+
+# On fait pareil pour les données de 2017 à 2022 (avec le débourrement) :
+data_deb <- read_xlsx("../../data/vitadapt/DATA_DEB_vitadapt_2012_2023.xlsx")
+data_deb$`DATE_50_JJ_DEB` <- as.numeric(str_replace_all(data_deb$`DATE 50 JJ`, ",", "."))
+data_deb$`DATE_50_ST_DEB` <- as.numeric(str_replace_all(data_deb$`DATE 50 ST`, ",", "."))
+# data_deb$`DATE_50_JJ_FLO` <- as.numeric(str_replace_all(data_deb$`DATE_50_JJ_FLO`, ",", "."))
+# data_deb$`DATE_50_ST_FLO` <- as.numeric(str_replace_all(data_deb$`DATE_50_ST_FLO`, ",", "."))
+data_deb <- data_deb[!is.na(data_deb$DATE_50_JJ_DEB),]
+# mettre en minuscule le nom des cépages et supprimer les n et b 
+data_deb$cepage <- substr(str_to_lower(data_deb$cepage),1,nchar(data_deb$cepage)-2)
+data_deb$cepage <- str_replace(data_deb$cepage, "-", " ")
+data_deb[data_deb$cepage == "sauvignon",]$cepage <- "sauvignon blanc"
+data_deb <- data_deb[data_deb$cepage %in% c(debourrement.plant.grape$varieties, 
+                                            gfv.param.values$varieties,
+                                            SUWE.param.values$varieties,
+                                            floraison.ref) ,]
+data_deb <- data_deb %>% group_by(année, cepage) %>% 
+  summarise(date_st_deb = mean(`DATE_50_ST_DEB`), date_jj_deb = mean(`DATE_50_JJ_DEB`))
+
+data_pheno <- data_pheno %>% left_join(data_deb, by = c("année","cepage"))
+```
+
+## Comparaison :
+
+### Débourrement :
+
+Dans tous les boxplots qui vont suivre, les boites à moustaches principales (en noir) répresent les simulations d'un stade phénologique pour les "parcelles producteurs" (celles présentes dans notre jeu de donénes ESCA), en rouge les simulations faites sur la parcelle vitadapt, et en bleu les observations réelles de la parcelle vitadapt.
+
+```{r}
+data_counts <- date_debourrement %>%
+  group_by(cepage) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(date_debourrement, aes(x = cepage, y = debourrement_SUWE)) +
+  geom_boxplot() +
+  geom_point(data = date_deb_vitadapt, aes(x = cepage, y = debourrement, col = "red")) +
+geom_text(data = data_counts, aes(x = cepage, y =  max(date_debourrement$debourrement_SUWE, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Cépages", y = "Date de débourrement simulée",
+       title = "Simulation des dates de débourrement",
+         col = "vitadapt")
+```
+
+```{r}
+data_counts <- date_debourrement %>%
+  group_by(year) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(date_debourrement, aes(x = as.factor(year), y = debourrement_SUWE)) +
+  geom_boxplot() +
+  geom_point(data = date_deb_vitadapt, aes(x = as.factor(year), y = debourrement, col = "red")) +
+geom_text(data = data_counts, aes(x = as.factor(year), y =  max(date_debourrement$debourrement_SUWE, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Années", y = "Date de débourrement simulée",
+       title = "Simulation des dates de débourrement",
+         col = "vitadapt")
+```
+
+
+
+```{r}
+for(cep in sort(unique(date_debourrement$cepage))){
+  date_cepage <- date_debourrement %>% filter(cepage == cep)
+  data_counts <- date_cepage %>%
+    group_by(year) %>%
+    summarise(n = n(), .groups = "drop")
+  
+  p <- ggplot(date_cepage, aes(x = as.factor(year), y = debourrement_SUWE)) +
+    geom_boxplot() +
+    geom_point(data = date_deb_vitadapt %>% filter(cepage == cep), aes(x = as.factor(year), y = debourrement, col = "simulations")) +
+    geom_point(data = data_pheno %>% filter(cepage == cep), aes(x = as.factor(année), y = date_jj_deb, col = "réelles")) +
+  geom_text(data = data_counts, aes(x = as.factor(year), y =  max(date_cepage$debourrement_SUWE, na.rm = TRUE) + 2, label = n), 
+              position = position_dodge(width = 0.75), size = 3) +  
+    theme(axis.text.x = element_text(angle = 90, size = 9)) +
+    labs(x = "Années", y = "Date de débourrement simulée",
+         title = paste("Simulation des dates de débourrement du", cep),
+         col = "vitadapt") + 
+  scale_color_manual(
+    name = "Vitadapt",
+    values = c("réelles" = "blue", "simulations" = "red")
+  )
+  plot(p)
+  print(cep)
+  print(paste("Distance moyenne simulation tous - observations vitadapt :",
+  abs(mean(date_cepage$debourrement_SUWE, na.rm = TRUE) - mean(data_pheno[data_pheno$cepage == cep,]$date_jj_deb, na.rm = TRUE))))
+  print(paste("Distance moyenne simulation vitadapt - observations vitadapt :",
+  abs(mean(date_deb_vitadapt[date_deb_vitadapt$cepage == cep,]$debourrement, na.rm = TRUE) - mean(data_pheno[data_pheno$cepage == cep,]$date_jj_deb, na.rm = TRUE))))
+}
+```
+
+Pour la plupart des cépages (sauf chardonnay et syrah), les simulations de débourrement sur la parcelle vitadapt sont toujours plus précoce que les observations réelles et que les simulations sur les parcelles des producteurs.
+
+Selon le cépage, les simulations de débourrement sur les parcelles des producteurs sont plus tardives ou plus précoces que les observations vitadapt.
+
+Pour certains cépages, les observations de débourrement sur la parcelle vitadapt semblent plus proches des simulations faites sur les parcelles des producteurs que celle faites sur la parcelle vitadapt. 
+
+Ici, étant donné que les simulations SUWE sur la parcelle vitadapt sont plus précoces que les autres simulations, cela signifie que la température quotidienne est proche de l'optimale : 26.1°-> cumul plus d'unité de chaleur -> prévisions trop précoce.
+
+```{r}
+# Hypothèses :
+# 
+# - Il se peut que la température ne soit pas le seul facteur expliquant la date de debourrement, en tout cas que son effet soit sur estimé dans le modèle SUWE.
+# 
+# - Ou alors, la température optimale quotidienne à atteindre dépend aussi de la région : car avec gfv (directement cumul de degrès jours a atteindre) les simulations sont satisfaisantes sur la parcelle vitadapt, donc un cumul de degrès à atteindre par cépage semble satisfaisant : Pour le modèle SUWE et la parcelle vitadapt il faudrait cumulé moins d'unité de chaleur pour avoir un débourrement plus tardive : avoir une température optimale plus forte ou plus faible. Ou le cumul d'unité de chaleur depend de la région et du cépage.
+# 
+# - Ou alors : alternance de jours chauds / froids = toujours loin d'une température optimale : cumul moins d'unité de chaleur qu'un climat moyen proche de la température optimale, mais autant de degrès jours : cela plait à certains cépage, (SUWE mauvais : tardif, gfv bon) et pas à d'autres (SUWE bon, gfv mauvais : trop précoce). Et à l'inverse, si on a un climat avec des températures quotidiennes moyennes, si ça plait à un cépage les 2 modèles fonctionneront bien, sinon ils auront du mal : prévisions trop précoce.
+```
+
+
+
+### Floraison SUWE :
+
+```{r}
+data_counts <- date_floraison %>%
+  group_by(cepage) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(date_floraison, aes(x = cepage, y = flo_SUWE)) +
+  geom_boxplot() +
+  geom_point(data = date_flo_vitadapt, aes(x = cepage, y = floraison_SUWE, col = "red")) +
+geom_text(data = data_counts, aes(x = cepage, y =  max(date_floraison$flo_SUWE, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Cépages", y = "Date de floraison simulée",
+       title = "Simulation des dates de floraison SUWE",
+         col = "vitadapt")
+```
+
+```{r}
+data_counts <- date_floraison %>%
+  group_by(year) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(date_floraison, aes(x = as.factor(year), y = flo_SUWE)) +
+  geom_boxplot() +
+  geom_point(data = date_flo_vitadapt, aes(x = as.factor(year), y = floraison_SUWE, col = "red")) +
+geom_text(data = data_counts, aes(x = as.factor(year), y =  max(date_floraison$flo_SUWE, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Années", y = "Date de floraison simulée",
+       title = "Simulation des dates de floraison SUWE",
+         col = "vitadapt")
+```
+
+```{r}
+for(cep in sort(unique(date_floraison$cepage))){
+  date_cepage <- date_floraison %>% filter(cepage == cep)
+  data_counts <- date_cepage %>%
+  group_by(year) %>%
+  summarise(n = n(), .groups = "drop")
+
+  p <- ggplot(date_cepage, aes(x = as.factor(year), y = flo_SUWE)) +
+  geom_boxplot() +
+  geom_point(data = date_flo_vitadapt %>% filter(cepage == cep), aes(x = as.factor(year), y = floraison_SUWE, col = "simulations")) +
+    geom_point(data = data_pheno %>% filter(cepage == cep), aes(x = as.factor(année), y = date_jj, col = "réelles")) +
+  geom_text(data = data_counts, aes(x = as.factor(year), y =  max(date_cepage$flo_SUWE, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Années", y = "Date de floraison simulée",
+       title = paste("Simulation des dates de floraison SUWE du cépage :", cep),
+         col = "vitadapt") +
+  scale_color_manual(
+    name = "Vitadapt",
+    values = c("réelles" = "blue", "simulations" = "red")
+  )
+  plot(p)
+}
+```
+
+Même observation que pour le débourrement.
+
+### Floraison gfv :
+
+```{r}
+data_counts <- date_floraison %>%
+  group_by(cepage) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(date_floraison, aes(x = cepage, y = flo_gfv)) +
+  geom_boxplot() +
+  geom_point(data = date_flo_vitadapt, aes(x = cepage, y = floraison_gfv, col = "red")) +
+geom_text(data = data_counts, aes(x = cepage, y =  max(date_floraison$flo_gfv, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Cépages", y = "Date de floraison simulée",
+       title = "Simulation des dates de floraison gfv",
+         col = "vitadapt")
+```
+
+```{r}
+data_counts <- date_floraison %>%
+  group_by(year) %>%
+  summarise(n = n(), .groups = "drop")
+
+ggplot(date_floraison, aes(x = as.factor(year), y = flo_gfv)) +
+  geom_boxplot() +
+  geom_point(data = date_flo_vitadapt, aes(x = as.factor(year), y = floraison_gfv, col = "red")) +
+geom_text(data = data_counts, aes(x = as.factor(year), y =  max(date_floraison$flo_gfv, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Années", y = "Date de floraison simulée",
+       title = "Simulation des dates de floraison gfv",
+         col = "vitadapt")
+```
+
+```{r}
+for(cep in sort(unique(date_floraison$cepage))){
+  date_cepage <- date_floraison %>% filter(cepage == cep)
+  data_counts <- date_cepage %>%
+  group_by(year) %>%
+  summarise(n = n(), .groups = "drop")
+
+  p <- ggplot(date_cepage, aes(x = as.factor(year), y = flo_gfv)) +
+  geom_boxplot() +
+  geom_point(data = date_flo_vitadapt %>% filter(cepage == cep), aes(x = as.factor(year), y = floraison_gfv, col = "simulations")) +
+    geom_point(data = data_pheno %>% filter(cepage == cep), aes(x = as.factor(année), y = date_jj, col = "réelles")) +
+  geom_text(data = data_counts, aes(x = as.factor(year), y =  max(date_cepage$flo_gfv, na.rm = TRUE) + 2, label = n), 
+            position = position_dodge(width = 0.75), size = 3) +  
+  theme(axis.text.x = element_text(angle = 90, size = 9)) +
+  labs(x = "Années", y = "Date de floraison simulée",
+       title = paste("Simulation des dates de floraison gfv du cépage :", cep),
+         col = "vitadapt") +
+  scale_color_manual(
+    name = "Vitadapt",
+    values = c("réelles" = "blue", "simulations" = "red")
+  )
+  plot(p)
+}
+```
+
+Peu importe le modèle, le stade phénologique simulé et le cépage, il existe un réel décalage entre les simulations sur les parcelles des producteurs et la parcelle vitadapt (simulations et observations), mais avec le modèle gfv les observations de floraison de la parcelle vitadapt sont plus proches des simulations sur cette parcelle que sur les autres.
+
+On ne peut donc pas rejeter notre hypothèse selon laquelle la calibration des paramètres du modèle SUWE est faite sur des données où chaque cépage est dans les régions où on le retrouve habituellement, et donc le modèle aurait du mal à extrapoler sur de nouveaux couples régions / cépages.
+
+-> A discuter : Sauf que pour le cabernet franc et le merlot on observe de grandes différences entre simulations vitadapt et observations vitadapt, or ces deux cépages sont présents dans la région bordelaise d'apèrs la carte page 39 de "Identification of ecoclimatic indicators of esca disease through 20 years of large-scale vineyard monitoring in France".
+
+Sur l'ensemble des parcelles, les années 2015 et 2022 ne semblent pas particulières, mais elles peuvent l'être sur la parcelle vitadapt.
+

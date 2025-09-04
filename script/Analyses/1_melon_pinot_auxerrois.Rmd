@@ -1,0 +1,294 @@
+---
+title: 'Floraison : Melon et pinot auxerrois'
+author: "Gabriel Macé"
+date: "2025-04-01"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    
+    
+---
+
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+```{r}
+library(datetimeutils) # Gestion des formats de dates / temps
+library(dplyr)
+library(ggplot2)
+library(Metrics) # Qualité des prédictions
+library(readxl)
+```
+
+## Objectifs :
+
+Dans nos modèles de simulations de la floraison de la vigne, il nous manque les paramètres concernant la floraison de deux cépages : le melon, et le pinot auxerrois.
+
+Nous allons essayer de simuler ces dates de floraison, soit en estimant un paramètre : le nombre de degré-jour nécessaires, soit en se basant sur la simulation d'un autre cépage, comme nous avions pu le faire pour le débourrement grâce à plantGrape.fr.
+
+! Pour le calcul de degrès cumulés : j'ai pris la moyenne entre le min et le max par jour, pour être cohérent avec nos modèles de phénologie.
+
+## I - Melon :
+
+Pour le melon, nous allons nous baser sur des données issues du domaine expérimental de l'IFV à Montreuil-Bellay de  2008 à 2022 (sans 2015 et 2016), et les données climatiques correspondantes, issues d'une station météo.
+
+### Comparaison inter-cépages : 
+
+```{r}
+# Récupération et mise en forme des données de phéno :
+flo_melon <- read_xlsx("../../data/phenologie/pheno_melon.xlsx")
+colnames(flo_melon)[1] <- "cepage"
+flo_melon <- flo_melon[flo_melon$cepage %in% c("Cabernet franc", "Cabernet Sauvignon", "Chenin", 
+                                              "Grolleau noir", "Melon", "Chardonnay"),]
+flo_melon$F50 <- convert_date(as.numeric(flo_melon$F50), type = "excel", fraction = FALSE)
+flo_melon$F50 <- as.numeric(strftime(as.Date(flo_melon$F50), format = "%j"))
+annees <- c()
+for(an in c(2008:2014, 2017:2022)) annees <- c(annees, rep(an, 6))
+flo_melon$annee <- annees
+flo_melon <- flo_melon %>% filter(!is.na(F50))
+
+
+# Récupération et mise en forme des données de climat :
+climat_melon <- read_xls("../../data/climat/climat_melon.xls", skip = 50)[, 2:8] %>% filter(AN %in% c(2008:2014, 2017:2022))
+# Calculer si besoin la température moyenne avec la même formule que dans nos fonctions de péhnologies :
+climat_melon$TM2 <- (climat_melon$TN + climat_melon$TX)/2
+```
+
+```{r}
+# Calcul de degrés jours nécessaire à la floraison : 
+flo_melon$flo_cumul_degres2 <- NA
+for(cepage in unique(flo_melon$cepage)){
+  for(annee in unique(flo_melon[flo_melon$cepage == cepage,]$annee)){
+      jj <- flo_melon[flo_melon$cepage == cepage & flo_melon$annee == annee,]$F50 # Récupération de la date de floraison
+      climat <- climat_melon[climat_melon$AN == annee,]
+      flo_melon[flo_melon$cepage == cepage & flo_melon$annee == annee,]$flo_cumul_degres2 <- sum( c(climat[60:jj,]$TX + climat[60:jj,]$TN)/2) # Récupération de la somme des degrés jusqu'à la date de floraison depuis le 1er mars
+  }
+}
+```
+
+```{r}
+# Réprésentation des dates de floraison par cépages : 
+data_counts <- flo_melon %>%
+  group_by(cepage) %>%
+  summarise(n = n(), .groups = "drop")
+flo_melon %>% ggplot() +
+  geom_boxplot(aes(x=reorder(cepage, F50), y=F50)) +
+  geom_text(data = data_counts, aes(x = as.factor(cepage), y =  max(flo_melon$F50) + 2, label = n), position = position_dodge(width = 0.75), size = 3) + 
+  labs(x = "Cépages", y = "Jour de floraison",
+       title = "Jour de floraison par cépage")
+
+
+
+flo_melon %>% ggplot() +
+  geom_boxplot(aes(x=reorder(cepage, flo_cumul_degres2), y=flo_cumul_degres2)) +
+  geom_text(data = data_counts, aes(x = as.factor(cepage), y =  max(flo_melon$flo_cumul_degres2) + 2, label = n), position = position_dodge(width = 0.75), size = 3) + 
+  labs(x = "Cépages", y = "Cumul de degrès",
+       title = "Cumul de degrès nécessaire à floraison par cépage")
+
+```
+
+
+```{r}
+# Calcul des écarts de floraisons : 
+ecart_melon = data.frame(cepage = NULL, ecart_jours = NULL, ecart_cumul_degres2 = NULL)
+for(cepage in c("Cabernet franc", "Cabernet Sauvignon", "Chenin", "Grolleau noir", "Chardonnay")){
+  ecart_melon = rbind( ecart_melon, data.frame(
+    cepage = cepage, 
+    ecart_jours = flo_melon[flo_melon$cepage == cepage, ]$F50 - flo_melon[flo_melon$cepage == "Melon",]$F50, 
+    ecart_cumul_degres2 = flo_melon[flo_melon$cepage == cepage, ]$flo_cumul_degres2 - flo_melon[flo_melon$cepage == "Melon",]$flo_cumul_degres2
+    ))
+}
+
+
+data_counts <- ecart_melon %>%
+  group_by(cepage) %>%
+  summarise(n = n(), .groups = "drop")
+
+ecart_melon %>% ggplot() +
+  geom_boxplot(aes(
+  x = reorder(cepage, ecart_jours), y = ecart_jours)) +
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_text(data = data_counts, aes(x = as.factor(cepage), y =  max(ecart_melon$ecart_jours) + 2, label = n), position = position_dodge(width = 0.75), size = 3) + 
+  labs(x = "Cépages", y = "Ecart : Cépage - melon",
+       title = "Ecart en jour entre la floraison des cépages et celle du melon")
+
+
+ecart_melon %>% ggplot() +
+  geom_boxplot(aes(
+  x = reorder(cepage, ecart_cumul_degres2), y = ecart_cumul_degres2)) +
+  geom_hline(aes(yintercept=0), linetype = 2) +
+  geom_text(data = data_counts, aes(x = as.factor(cepage), y =  max(ecart_melon$ecart_cumul_degres2) + 2, label = n), position = position_dodge(width = 0.75), size = 3) + 
+  labs(x = "Cépages", y = "Ecart : Cépage - melon",
+       title = "Ecart en degrés cumulés entre la floraison des cépages et celle du melon")
+```
+
+Calcul des RMSE entre la floraison du melon et des autres cépages : 
+
+```{r}
+print("RMSE par cépages (jours) :")
+for(cepage in c("Cabernet franc", "Cabernet Sauvignon", "Chenin", "Grolleau noir", "Chardonnay")){
+  print(paste0(cepage, " : ",
+               round(rmse(flo_melon[flo_melon$cepage == cepage,]$F50,
+                          flo_melon[flo_melon$cepage == "Melon",]$F50),2)))
+}
+
+
+print("RMSE par cépages (degrès cumulés) :")
+for(cepage in c("Cabernet franc", "Cabernet Sauvignon", "Chenin", "Grolleau noir", "Chardonnay")){
+  print(paste0(cepage, " : ",
+               round(rmse(flo_melon[flo_melon$cepage == cepage,]$flo_cumul_degres2,
+                          flo_melon[flo_melon$cepage == "Melon",]$flo_cumul_degres2),2)))
+}
+```
+
+Calcul des écarts médians entre la floraison du melon et des autres cépages : 
+
+```{r}
+print("Ecart médian avec le melon en jour :")
+ecart_melon %>% group_by(cepage) %>% summarise(date_median = median(ecart_jours))
+
+print("Ecart moyen avec le melon en jour :")
+ecart_melon %>% group_by(cepage) %>% summarise(date_mean = mean(ecart_jours))
+
+print("Ecart médian avec le melon en degrès cumulés :")
+ecart_melon %>% group_by(cepage) %>% summarise(degres_cumules_median = median(ecart_cumul_degres2))
+
+print("Ecart moyen avec le melon en degrès cumulés :")
+ecart_melon %>% group_by(cepage) %>% summarise(degres_cumules_mean = mean(ecart_cumul_degres2))
+```
+
+Au vu des écarts de floraison entre ces différents cépages et le melon, le cépage le plus proche du melon en terme de date floraison semble être le cabernet franc, avec un écart médian de 0 jours.
+
+Cependant, cela est moins évident en regardant le nombre de degrés cumulés, mais surtout les dates de floraison du chardonnay et du melon obtiennent la petite rmse, ce qui est du à la très petite variabilité de leurs écarts : il y a un écart très régulier : La date de floraison du melon est très souvent un jour ou deux jours après celle du chardonnay.
+
+Il faudrait peut être plus se fier à cette deuxième relation pour prédire la floraison du melon.
+
+```{r}
+plot(x = c(2008:2014, 2017:2022),y = ecart_melon[ecart_melon$cepage == "Cabernet franc",]$ecart_jours, xlab = "Années", ylab = "Cabernet franc - Melon", 
+     main = "Ecart de floraison entre le cabernet franc et le melon, par année")
+abline(h = 0, col = "red", lty = 2)
+
+plot(x = c(2008:2014, 2017:2022),y = ecart_melon[ecart_melon$cepage == "Chardonnay",]$ecart_jours, xlab = "Années", ylab = "Chardonnay - Melon", 
+     main = "Ecart de floraison entre le chardonnay et le melon, par année")
+abline(h = 0, col = "red", lty = 2)
+
+plot(x = c(2008:2014, 2017:2022),y = ecart_melon[ecart_melon$cepage == "Chenin",]$ecart_jours, xlab = "Années", ylab = "Chenin - Melon", 
+     main = "Ecart de floraison entre le chenin et le melon, par année")
+abline(h = 0, col = "red", lty = 2)
+```
+
+
+Représentativité des dates de floraison par rapport aux paramètres du modèle gfv :
+
+```{r}
+print("Cumul de degrès jours nécessaire pour le cabernet franc dans gfv : 1225")
+print(paste0("Ici : ", median(flo_melon[flo_melon$cepage == "Cabernet franc", ]$flo_cumul_degres2)))
+
+
+print("Cumul de degrès jours nécessaire pour le cabernet sauvignon dans gfv : 1270")
+print(paste0("Ici : ", median(flo_melon[flo_melon$cepage == "Cabernet Sauvignon", ]$flo_cumul_degres2)))
+
+print("Cumul de degrès jours nécessaire pour le chenin dans gfv : 1280")
+print(paste0("Ici : ", median(flo_melon[flo_melon$cepage == "Chenin", ]$flo_cumul_degres2)))
+
+print("Cumul de degrès jours nécessaire pour le chardonnay dans gfv : 1217")
+print(paste0("Ici : ", median(flo_melon[flo_melon$cepage == "Chardonnay", ]$flo_cumul_degres2)))
+
+```
+
+```{r}
+# median(flo_melon[flo_melon$cepage == "Melon", ]$flo_cumul_degres2)
+
+# mean(flo_melon[flo_melon$cepage == "Melon", ]$flo_cumul_degres2)
+```
+
+### Erreur de prédiction - melon: 
+
+```{r}
+# Chargement des fonctions de phénologies
+source("../../R_functions/fonctions_pheno.R")
+
+climat_melon$doy <- as.numeric(format(as.Date(sprintf("%04d-%02d-%02d", climat_melon$AN, climat_melon$MOIS, climat_melon$JOUR)), "%j"))
+
+# Gestion des NA
+climat_melon$TX[218] <- (climat_melon$TX[217] + climat_melon$TX[219]) / 2
+climat_melon$TN[218] <- (climat_melon$TN[217] + climat_melon$TN[219]) / 2
+
+climat_melon$TX[4338] <- (climat_melon$TX[4337] + climat_melon$TX[4339]) / 2
+climat_melon$TN[4338] <- (climat_melon$TN[4337] + climat_melon$TN[4339]) / 2
+
+flo = floraison(cepage = "melon", tn = climat_melon$TN, tx = climat_melon$TX, doy = climat_melon$doy, year = climat_melon$AN)
+```
+
+
+```{r}
+plot(flo_melon[flo_melon$cepage == "Melon",]$F50~flo_melon[flo_melon$cepage == "Melon",]$annee, xlab = "year", ylab = "Jour de floraison", main ="Floraison : Observations (noir) vs prévisions gfv (rouge)")
+points(x = flo$year, y = flo$flo_gfv, col = "red")
+```
+
+Pas trop mal, peu aller de 1 jours d'écart (2014, 2018) à 10 en 2011.
+
+```{r}
+plot(flo_melon[flo_melon$cepage == "Melon",]$F50~flo_melon[flo_melon$cepage == "Melon",]$annee, xlab = "year", ylab = "Jour de floraison", main ="Floraison : Observations (noir) vs prévisions SUWE (bleu)")
+points(x = flo$year, y = flo$flo_SUWE, col = "blue")
+```
+Pareil, varie d'un écart de 2 en 210 à 9 jours en 2019
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
