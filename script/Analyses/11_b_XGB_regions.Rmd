@@ -1,0 +1,1528 @@
+---
+title: "Modèles par région"
+author: "Gabriel Macé"
+date: "2025-06-17"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+```{r}
+library(reticulate)
+# Dis à R d’utiliser le bon environnement Python
+use_python("C:/Users/Lucas/AppData/Local/r-miniconda/envs/bayesenv/python.exe", required = TRUE)
+```
+
+```{python}
+# Importation des bibliothèques nécessaires
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split,cross_val_score
+import pyreadr
+```
+
+```{python}
+# Chargement des données
+observations = pyreadr.read_r("../../data/modelisation/observations.RData")["observations"]
+observations = pd.DataFrame(observations)
+```
+
+### Préparation des données :
+
+```{python}
+var_an_pheno = list(observations.columns[12:47]) # ne pas garder la longueur de la période = 365 ou 366
+var_an = list(observations.columns[49:84]) # ne pas garder la longueur de la période
+var_dormance = list(observations.columns[85:121])
+var_deb_to_flo = list(set(observations.columns[122:158]) - set(["sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"]))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes = list(set(observations.columns[159:195]) - set(["sum.frost.days.0.symptomes"])) # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end = list(observations.columns[196:232])
+
+var_tt = var_an_pheno + var_an + var_dormance + var_deb_to_flo + var_symptomes + var_deb_to_end
+
+
+observations.loc[observations.region_viticole == "Cotes-du-Rhone nord", "region_viticole"] = "Cotes-du-Rhone"
+observations.loc[observations.region_viticole == "Cotes-du-Rhone sud", "region_viticole"] = "Cotes-du-Rhone"
+observations['cepage'] = observations['cepage'].astype('category')
+observations['region_viticole'] = observations['region_viticole'].astype('category')
+```
+
+```{python}
+observations.groupby(['region_viticole', 'cepage'], observed=True).size()
+```
+
+```{python}
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+
+score_var = pd.read_excel("../../data/resultats/r2_rmse_par_variable.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars = var_tt + list(["age_parcelle_estime", "RU", "debourrement", "floraison" ])
+to_rm = []
+for var1 in vars:
+    if var1 not in to_rm:
+        for var2 in list(set(vars) - set([var1] + to_rm)):
+            corr = np.corrcoef(observations[var1], observations[var2])[0, 1]
+            if corr > 0.8:
+                rmse1 = score_var.loc[score_var["variable"] == var1, "rmse"].values[0]
+                rmse2 = score_var.loc[score_var["variable"] == var2, "rmse"].values[0]
+                if rmse1 > rmse2:
+                    to_rm.append(var1)
+                else:
+                    to_rm.append(var2)
+                break
+
+
+to_keep = list(["cepage"]) + list(set(vars) - set(to_rm))
+```
+
+## Résumé des incidences par régions :
+
+```{python}
+observations[["region_viticole","pourcentage_esca"]].groupby("region_viticole").describe().iloc[:,:3]
+observations.pourcentage_esca.describe()
+```
+
+## XGBoost régionaux généraux :
+
+```{python}
+from xgboost import XGBRegressor
+
+rmse = []
+mae = []
+
+for region in np.unique(observations.region_viticole):
+  print(region)
+  data =  observations.loc[observations.region_viticole == region]
+  X = pd.get_dummies(data[to_keep])
+  y = data['pourcentage_esca']
+  X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+  best_model = XGBRegressor(learning_rate = 0.1, max_depth = 6, n_estimators = 100, objective = 'count:poisson', verbose=-1)
+  best_model.fit(X_train, y_train)
+  y_test_pred = best_model.predict(X_test)
+  
+  rmse = rmse + list([np.sqrt(np.mean((y_test - y_test_pred)**2))])
+  mae = mae + list([np.mean(np.abs(y_test - y_test_pred))])
+  
+res = pd.DataFrame({'region' : np.unique(observations.region_viticole), 'rmse' : rmse, 'mae' : mae})
+res
+```
+
+
+
+## Alsace
+
+```{python}
+# Préparation des données :
+alsace = observations.loc[observations.region_viticole == "Alsace"]
+X = pd.get_dummies(alsace[to_keep])
+y = alsace['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# from sklearn.metrics import r2_score
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.05, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.05, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=0)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Alsace", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Alsace", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+## Bordelais
+
+```{python}
+# Préparation des données :
+bordelais = observations.loc[observations.region_viticole == "Bordelais"]
+X = pd.get_dummies(bordelais[to_keep])
+y = bordelais['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=-1)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Bordelais", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Bordelais", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+
+## Bourgogne
+
+```{python}
+# Préparation des données :
+bourgogne = observations.loc[observations.region_viticole == "Bourgogne"]
+X = pd.get_dummies(bourgogne[to_keep])
+y = bourgogne['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.01, max_depth = 6, n_estimators = 200, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.01, max_depth = 6, n_estimators = 200, objective = 'count:poisson', verbose=-1)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Bourgogne", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Bourgogne", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+
+## Champagne
+
+```{python}
+# Préparation des données :
+champagne = observations.loc[observations.region_viticole == "Champagne"]
+X = pd.get_dummies(champagne[to_keep])
+y = champagne['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.01, max_depth = 3, n_estimators = 100, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.01, max_depth = 3, n_estimators = 100, objective = 'count:poisson', verbose=-1)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Champagne", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Champagne", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+
+## Charentes
+
+```{python}
+# Préparation des données :
+charentes = observations.loc[observations.region_viticole == "Charentes"]
+X = pd.get_dummies(charentes[to_keep])
+y = charentes['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 50, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 50, objective = 'count:poisson', verbose=-1)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Charentes", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Charentes", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+## Cotes-du-Rhone
+
+```{python}
+# Préparation des données :
+cotes_rhone = observations.loc[observations.region_viticole == "Cotes-du-Rhone"]
+X = pd.get_dummies(cotes_rhone[to_keep])
+y = cotes_rhone['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 50, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 50, objective = 'count:poisson', verbose=-1)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Cotes-du-Rhone", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Cotes-du-Rhone", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+## Jura
+
+```{python}
+# Préparation des données :
+jura = observations.loc[observations.region_viticole == "Jura"]
+X = pd.get_dummies(jura[to_keep])
+y = jura['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.05, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.05, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=-1)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Jura", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Jura", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+## Languedoc
+
+```{python}
+# Préparation des données :
+languedoc = observations.loc[observations.region_viticole == "Languedoc"]
+X = pd.get_dummies(languedoc[to_keep])
+y = languedoc['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=-1)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Languedoc", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Languedoc", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+## Provence
+
+```{python}
+# Préparation des données :
+provence = observations.loc[observations.region_viticole == "Provence"]
+X = pd.get_dummies(provence[to_keep])
+y = provence['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.01, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.01, max_depth = 3, n_estimators = 200, objective = 'count:poisson', verbose=-1)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Provence", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Provence", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+## Val de Loire
+
+```{python}
+# Préparation des données :
+val_loire = observations.loc[observations.region_viticole == "Val de Loire"]
+X = pd.get_dummies(val_loire[to_keep])
+y = val_loire['pourcentage_esca']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+### Cross-validation : 
+
+```{python}
+from sklearn.model_selection import  GridSearchCV
+# Définition des paramètres à optimiser
+param_grid = {
+    # max_depth est la profondeur maximale de chaque arbre. Une valeur plus élevée rendra le modèle plus complexe et pourrait entraîner un surapprentissage.
+    'max_depth': [3, 6, 9],
+    
+    # learning_rate (ou taux d'apprentissage) est le pas d'ajustement effectué à chaque étape de l'optimisation. Une valeur plus faible rendra l'apprentissage plus lent.
+    'learning_rate': [0.01, 0.05, 0.1, 0.3],
+    
+    # n_estimators est le nombre d'arbres à construire.
+    'n_estimators': [50, 100, 200,500],
+    'objective' : ["count:poisson"]
+}
+
+# Création de l'objet GridSearch
+model = XGBRegressor()
+grid_search = GridSearchCV(model, param_grid, cv=10, n_jobs=1, verbose=0)
+```
+
+```{python}
+# # Entraînement du modèle avec GridSearch
+# grid_search.fit(X_train, y_train)
+# 
+# # Affichage des meilleurs paramètres
+# print("Best parameters found: ", grid_search.best_params_)
+```
+
+### Création du meilleur modèle :
+
+```{python}
+# Utilisation du meilleur modèle trouvé pour la prédiction
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 50, objective = 'count:poisson', verbose=0)
+xgb.fit(X_train, y_train)
+y_train_pred = xgb.predict(X_train)
+y_test_pred = xgb.predict(X_test)
+
+# Report
+print("\nTrain RMSE:")
+print(np.sqrt(np.mean((y_train - y_train_pred)**2)))
+print("\nTrain mean error:")
+print(np.mean(np.abs(y_train - y_train_pred)))
+print("\nTrain r²:")
+print(np.corrcoef(y_train, y_train_pred)[0,1]**2)
+print("\nTest RMSE:")
+print(np.sqrt(np.mean((y_test - y_test_pred)**2)))
+print("\nTest mean error:")
+print(np.mean(np.abs(y_test - y_test_pred)))
+print("\nTest r²:")
+print(np.corrcoef(y_test, y_test_pred)[0,1]**2)
+```
+
+```{python}
+# Graphique des erreurs :
+erreur = np.abs(y_test - y_test_pred)
+plt.scatter(y_test, erreur, s=2)
+plt.title("Erreur en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Erreur")
+plt.show()
+plt.clf()
+
+plt.scatter(y_test, y_test_pred, s=2)
+plt.plot(y_test, y_test, color = "red")
+plt.title("Prédiction en fonction de l'incidence d'esca")
+plt.xlabel("Incidence d'esca")
+plt.ylabel("Prédiciton")
+plt.show()
+plt.clf()
+```
+
+### Importance des variables :
+
+```{python}
+import shap
+# Apprentissage du modèle sur toutes les données de la région :
+xgb = XGBRegressor(learning_rate = 0.1, max_depth = 3, n_estimators = 50, objective = 'count:poisson', verbose=-1)
+xgb.fit(X, y)
+y_pred = xgb.predict(X)
+# Initialisation du Javascript
+shap.initjs()
+
+# Création de l'explainer
+explainer = shap.TreeExplainer(xgb)
+
+# Calcul des valeurs SHAP pour les instances de test
+shap_values = explainer.shap_values(X)
+explainer_values = explainer(X)
+```
+
+
+```{python}
+# Tracer le graphique SHAP de synthèse
+plt.title("Val de Loire", fontsize=10)
+shap.summary_plot(shap_values, X, plot_type="bar", max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+# Afficher le graphique
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Graphique SHAP résumé pour l'interprétabilité globale
+plt.title("Val de Loire", fontsize=10)
+shap.summary_plot(shap_values, X, max_display=10, show=False)
+plt.gca().tick_params(labelsize=10)
+plt.show()
+plt.clf()
+```
+
+
+```{python}
+# Moyenne des valeurs absolues des SHAP pour chaque variable
+shap_abs_mean = np.abs(shap_values).mean(axis=0)
+top10_idx = np.argsort(shap_abs_mean)[-10:]  # indices des 10 plus importantes
+top10_features = X.columns[top10_idx]
+
+from sklearn.inspection import partial_dependence, PartialDependenceDisplay
+
+for feature in top10_features:
+  shap.plots.scatter(explainer_values[:, feature], color=y_pred)
+  plt.clf()
+```
+
+
+
+
+
+

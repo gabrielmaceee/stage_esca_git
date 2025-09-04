@@ -1,0 +1,244 @@
+---
+title: "Intervalles de prédiction"
+author: "Gabriel Macé"
+date: "2025-06-16"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+Ce script écrit en python, a pour but d'explorer le potentiel de modèle utilisant explicitement des intervalles de prédictions, tel que LightGBM et les quantiles de régression linéaire, appliqué à nos données.
+
+```{r}
+library(reticulate)
+
+# Dis à R d’utiliser le bon environnement Python
+use_python("C:/Users/Lucas/AppData/Local/r-miniconda/envs/bayesenv/python.exe", required = TRUE)
+```
+
+```{python}
+# Importation des bibliothèques nécessaires
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, cross_val_score
+import pyreadr
+import lightgbm as lgb
+```
+
+### Préparation des données :
+
+```{python}
+# Chargement des données
+observations = pyreadr.read_r("../../data/modelisation/observations.RData")["observations"]
+observations = pd.DataFrame(observations)
+```
+
+```{python}
+var_an_pheno = list(observations.columns[12:47]) # ne pas garder la longueur de la période = 365 ou 366
+var_an = list(observations.columns[49:84]) # ne pas garder la longueur de la période
+var_dormance = list(observations.columns[85:121])
+var_deb_to_flo = list(set(observations.columns[122:158]) - set(["sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"]))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes = list(set(observations.columns[159:195]) - set(["sum.frost.days.0.symptomes"])) # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end = list(observations.columns[196:232])
+
+var_tt = var_an_pheno + var_an + var_dormance + var_deb_to_flo + var_symptomes + var_deb_to_end
+
+observations['cepage'] = observations['cepage'].astype('category')
+observations['region_viticole'] = observations['region_viticole'].astype('category')
+```
+
+```{python}
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+
+score_var = pd.read_excel("../../data/resultats/r2_rmse_par_variable.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars = var_tt + list(["age_parcelle_estime", "RU", "debourrement", "floraison" ])
+to_rm = []
+for var1 in vars:
+    if var1 not in to_rm:
+        for var2 in list(set(vars) - set([var1] + to_rm)):
+            corr = np.corrcoef(observations[var1], observations[var2])[0, 1]
+            if corr > 0.8:
+                rmse1 = score_var.loc[score_var["variable"] == var1, "rmse"].values[0]
+                rmse2 = score_var.loc[score_var["variable"] == var2, "rmse"].values[0]
+                if rmse1 > rmse2:
+                    to_rm.append(var1)
+                else:
+                    to_rm.append(var2)
+                break
+
+
+to_keep = list(["cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+
+features = pd.get_dummies(observations[to_keep])
+```
+
+## Intervalles de prédictions
+
+### LightGBM :
+
+```{python}
+# Préparation des données
+X = features
+y = observations['pourcentage_esca']
+
+# Division des données en ensemble d'apprentissage et de test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+```
+
+```{python}
+# Paramètres communs
+params_base = {
+    "objective": "quantile",
+    "metric": "quantile",
+    "learning_rate": 0.001, # 0.001,
+    "num_iterations": 10000, #10000,
+    "num_leaves": 31, # Nombre de feuilles ?
+    "min_data_in_leaf": 5,
+    "verbose": -1
+}
+```
+
+```{python}
+# IC de 90 %
+regressor = lgb.LGBMRegressor(**params_base, alpha = 0.5)
+regressor.fit(X_train, y_train)
+regressor_pred = regressor.predict(X_test)
+
+lower = lgb.LGBMRegressor(**params_base, alpha = 1 - 0.95)
+lower.fit(X_train, y_train)
+lower_pred = lower.predict(X_test)
+
+upper = lgb.LGBMRegressor(**params_base, alpha = 0.95)
+upper.fit(X_train, y_train)
+upper_pred = upper.predict(X_test)
+```
+
+```{python}
+# Vérification de l'inclusion dans l'intervalle
+within_interval = (y_test <= upper_pred) & (y_test >= lower_pred)
+n_within = np.sum(within_interval)
+
+print(f"Nombre d'observations dans l'intervalle [0.05, 0.95] : {n_within} / {len(y_test)} = {n_within / len(y_test)}")
+
+
+len_ic = np.mean(np.abs(upper_pred - lower_pred))
+print(f"Taille moyenne des intervalles : {len_ic}")
+```
+
+```{python}
+y_test_srt = y_test.reset_index(drop=True)
+y_test_srt = y_test_srt.sort_values()
+
+x = range(0, len(y_test))
+plt.figure(figsize=(10, 6))
+plt.scatter(x, lower_pred, color='limegreen', marker='o', label='lower', lw=0.5, alpha=0.5)
+plt.scatter(x, regressor_pred, color='aqua', marker='x', label='pred', alpha=0.7)
+plt.scatter(x, upper_pred, color='dodgerblue', marker='o', label='upper', lw=0.5, alpha=0.5)
+plt.scatter(x, y_test, color='red', s=1)
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(10, 6))
+plt.scatter(y_test, lower_pred, color='limegreen', marker='o', label='lower', lw=0.5, alpha=0.5)
+plt.scatter(y_test, regressor_pred, color='aqua', marker='x', label='pred', alpha=0.7)
+plt.scatter(y_test, upper_pred, color='dodgerblue', marker='o', label='upper', lw=0.5, alpha=0.5)
+plt.scatter(y_test, y_test, color='red', s=1)
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(10, 6))
+plt.plot(y_test_srt, lower_pred[y_test_srt.index], color='black')
+# plt.plot(y_test_srt, y_test_srt, color='red')
+plt.plot(y_test_srt, regressor_pred[y_test_srt.index], color='red')
+plt.plot(y_test_srt, upper_pred[y_test_srt.index], color='black')
+plt.legend()
+plt.show()
+```
+
+## Quantile régression linéaire :
+
+Ne marche pas pour l'instant.
+
+```{python}
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+```
+
+```{python}
+# Préparation des données
+to_use = list(["pourcentage_esca","cepage", "region_viticole"]) + list(set(vars) - set(to_rm))
+data = pd.get_dummies(observations[to_keep])
+
+# Division des données en ensemble d'apprentissage et de test
+data_train, data_test = train_test_split(data, test_size=0.2)
+```
+
+```{python}
+from statsmodels.formula.api import quantreg
+from patsy import dmatrices
+
+# Nom de la variable cible
+target = "pourcentage_esca"
+
+# Générer les prédicteurs en échappant correctement tous les noms
+predictors = data.columns.difference([target])
+escaped_predictors = [f'Q("{col}")' for col in predictors]
+
+# Créer la formule avec Q(...) pour échapper les noms non valides
+formula = f'Q("{target}") ~ ' + ' + '.join(escaped_predictors)
+
+# Appliquer la régression quantile
+mod = quantreg(formula, data)
+res = mod.fit(q=0.5)
+
+# Affichage des résultats
+print(res.summary())
+```
+
+```{python}
+# Using a for loop to print each element
+for type in data.dtypes:
+    print(type)
+```
+
+```{python}
+
+```

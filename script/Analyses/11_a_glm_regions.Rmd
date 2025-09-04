@@ -1,0 +1,777 @@
+---
+title: "GLM par régions"
+author: "Gabriel Macé"
+date: "2025-06-16"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+```
+
+```{r}
+library(lme4)
+library(dplyr)
+library(ggplot2)
+library(Metrics) # RMSE
+library(openxlsx)
+library(caret) # cv et findCorrelation
+
+load("../../data/modelisation/observations.RData")
+```
+
+```{r}
+# récupération des variables par type de période :
+var_an_pheno <- colnames(observations)[12:47] # ne pas garder la longueur de la période = 365 ou 366
+var_an <- colnames(observations)[49:84] # ne pas garder la longueur de la période
+var_dormance <- colnames(observations)[85:121]
+var_deb_to_flo <- setdiff(colnames(observations)[122:158] , c("sum.heat.days.35.deb_flo", "isv.faible.seq.15.deb_flo", "isv.fai_mod.seq.15.deb_flo", "isv.mod_sev.seq.10.deb_flo", "isv.mod_sev.seq.15.deb_flo"))
+# Enlever sum.heat.days.35.deb_flo car que 0
+var_symptomes <- setdiff(colnames(observations)[159:195], "sum.frost.days.0.symptomes") # Enlever sum.frost.days.0.symptomes car que 0
+var_deb_to_end <- colnames(observations)[196:232]
+var_tt <- c("age_parcelle_estime", "RU", "debourrement", "floraison", var_an_pheno, var_an, var_dormance, var_deb_to_flo, var_symptomes, var_deb_to_end)
+```
+
+```{r}
+observations$region_viticole[observations$region_viticole %in% c("Cotes-du-Rhone nord", "Cotes-du-Rhone sud")] <- "Cotes-du-Rhone"
+observations$cepage <- as.factor(observations$cepage)
+observations$region_viticole <- as.factor(observations$region_viticole)
+table(observations$region_viticole)
+```
+
+```{r}
+# table(observations$region_viticole, observations$cepage)
+# Enlever les couples cépages / région < 30 observations :
+# Cotes-du-Rhone : muscat petits grains, cinsault, gamay, grenache, syrah
+# Languedoc : carignan, cabernet franc, cabernet sauvignon, chardonnay, mourvedre, muscat petits grains, pinot noir, sauvignon blanc
+
+# Cotes-du-Rhone et Languedoc : ne reste plus rien
+
+# Bourgogne : meunier
+# Charentes : cabernet sauvignon
+# Provence : carignan, cinsault, mourvedre, muscat de hambourg, syrah
+# Champagne : pinot noir
+
+# observations <- observations[!(observations$region_viticole %in% c("Cotes-du-Rhone", "Languedoc")),]
+# 
+# observations <- observations[!(observations$region_viticole == "Bourgogne" & observations$cepage == "meunier"),]
+# observations <- observations[!(observations$region_viticole == "Charentes" & observations$cepage == "cabernet sauvignon"),]
+# observations <- observations[!(observations$region_viticole == "Champagne" & observations$cepage == "pinot noir"),]
+# observations <- observations[!(observations$region_viticole == "Provence" & observations$cepage %in% c("carignan", "cinsault", "mourvedre", "muscat de hambourg", "syrah")),]
+# table(observations$region_viticole, observations$cepage)
+```
+
+### Modèle nul / région :
+
+```{r}
+rmse = c()
+mae = c()
+for(region in unique(observations$region_viticole)){ 
+  print(region)
+  data <- observations[observations$region_viticole == region, ]
+  rownames(data) <- NULL
+  i_train = sample(1:dim(data)[1], replace = FALSE, size = dim(data)[1]*0.8)
+  pred = mean(data[i_train, "pourcentage_esca"])
+  rmse = c(rmse, round(rmse(data$pourcentage_esca[-i_train], pred),3))
+  mae = c(mae, mean(abs(data$pourcentage_esca[-i_train] - pred)))
+}
+
+res = data.frame(region_viticole = unique(observations$region_viticole), rmse_test = rmse, mae_test = mae)
+```
+
+```{r}
+# Enlever les variables trop corrélées pour ne pas mal interprétées les valeurs de SHAP :
+corr_matrix <- cor(observations[ ,var_tt])
+# high_corr <- findCorrelation(corr_matrix, cutoff = 0.8, names = TRUE)
+
+
+score_var <- read.xlsx("../../data/resultats/r2_rmse_par_variable.xlsx")
+# Pour toutes les variables, s'il elle est corrélée à une autre : 
+# garder celle qui à la meilleur rmse (glm avec (1|cepage) + (1|region_viticole) + var)
+vars <- var_tt
+to_rm <- c()
+for(var1 in vars){
+  if(!var1 %in% to_rm){
+    for(var2 in setdiff(vars, c(var1, to_rm))){
+      if(cor(observations[,var1], observations[,var2]) > 0.8){
+        if(score_var[score_var$variable == var1, "rmse"] > score_var[score_var$variable == var1, "rmse"]){
+          to_rm <- c(to_rm, var1)
+          break
+        }
+        to_rm <- c(to_rm, var2)
+      }
+    }
+  }
+}
+
+to_keep <- c("cepage", setdiff(vars, to_rm))
+to_keep
+```
+
+```{r}
+rmse = c()
+mae = c()
+r2s = c()
+for(region in unique(observations$region_viticole)){ 
+  print(region)
+  data <- observations[observations$region_viticole == region, c("pourcentage_esca", to_keep)]
+  data$pourcentage_esca <- as.integer(data$pourcentage_esca)
+  rownames(data) <- NULL
+  var2drop = c()
+  for(var in setdiff(colnames(data), "cepage")){
+    if(length(unique(data[,var]))==1) var2drop = c(var2drop, var)
+  }
+  data = data[, setdiff(colnames(data), var2drop)]
+  fixed_effects <- paste(colnames(data[,-c(1)]), collapse = " + ")
+  form <- as.formula(paste("pourcentage_esca ~", fixed_effects, "+ (1|cepage)" ))
+  i_train = sample(1:dim(data)[1], replace = FALSE, size = dim(data)[1]*0.8)
+  model_lm <- glmer(form, data = data[i_train ,])
+  pred = predict(model_lm, data[-i_train ,-c(1)])
+  rmse = c(rmse, round(rmse(data$pourcentage_esca[-i_train], pred),3))
+  mae = c(mae, mean(abs(data$pourcentage_esca[-i_train] - pred)))
+  r2s = c(r2s, cor(data$pourcentage_esca[-i_train], pred)^2)
+}
+
+res = data.frame(region_viticole = unique(observations$region_viticole), rmse_test = rmse, mae_test = mae, r2_test = r2s)
+```
+
+
+```{r}
+res
+```
+
+```{r}
+# load("../../data/modelisation/observations.RData")
+
+table(observations$cepage)
+# carigna = 29 obs, muscat petits grains = 25, mourvedre = 26
+```
+
+```{r}
+to_keep <- c("region_viticole", setdiff(vars, to_rm))
+```
+
+
+```{r}
+
+```
+
+```{r}
+obs <- observations
+obs$age_10_15 <- 0
+obs$age_10_15[obs$age_parcelle_estime <= 15] <- 1
+
+obs$age_15_25 <- 0
+obs$age_15_25[obs$age_parcelle_estime > 15 & obs$age_parcelle_estime <= 25] <- 1
+
+obs$age_25_30 <- 0
+obs$age_25_30[obs$age_parcelle_estime > 25] <- 1
+```
+
+```{r}
+to_use <- c("et0.symptomes", "ftsw.dormance", "auc_isv.symptomes", "sum.days.isv.mod_sev.an", "tv.deb_end", "swi.deb_flo", "tv.deb_end", "swi.deb_flo", "sum.heat.days.30.dormance", "rr.dormance") # , "RU"
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "region_viticole", "age_10_15", "age_15_25", "age_25_30")
+obs <- obs[,to_keep]
+obs[,2:12] <- scale(obs[,2:12] )
+```
+
+
+```{r}
+effects <- paste(to_use, collapse = " + ")
+
+effects <- paste0(effects, " + age_parcelle_estime:age_10_15 + age_parcelle_estime:age_15_25 + age_parcelle_estime:age_25_30") # Effet d'intéraction sans effet fixe
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects, " + (cepage|region_viticole)")) # verif que + (1|cepage)
+```
+
+```{r}
+observations <- observations[!(observations$region_viticole %in% c("Cotes-du-Rhone", "Languedoc")),]
+
+observations <- observations[!(observations$region_viticole == "Bourgogne" & observations$cepage == "meunier"),]
+observations <- observations[!(observations$region_viticole == "Charentes" & observations$cepage == "cabernet sauvignon"),]
+observations <- observations[!(observations$region_viticole == "Champagne" & observations$cepage == "pinot noir"),]
+observations <- observations[!(observations$region_viticole == "Provence" & observations$cepage %in% c("carignan", "cinsault", "mourvedre", "muscat de hambourg", "syrah")),]
+table(observations$region_viticole, observations$cepage)
+```
+
+```{r}
+obs <- observations
+obs$age_10_15 <- 0
+obs$age_10_15[obs$age_parcelle_estime <= 15] <- 1
+
+obs$age_15_25 <- 0
+obs$age_15_25[obs$age_parcelle_estime > 15 & obs$age_parcelle_estime <= 25] <- 1
+
+obs$age_25_30 <- 0
+obs$age_25_30[obs$age_parcelle_estime > 25] <- 1
+
+obs$ftsw_sympt_inf_0_4 <- 0
+obs$ftsw_sympt_inf_0_4[obs$ftsw.symptomes <= 0.4] <- 1
+
+obs$ftsw_sympt_sup_0_4 <- 0
+obs$ftsw_sympt_sup_0_4[obs$ftsw.symptomes > 0.4] <- 1
+
+obs$et0_sympt_inf_4 <- 0
+obs$et0_sympt_inf_4[obs$et0.symptomes <= 4] <- 1
+
+obs$et0_sympt_sup_4 <- 0
+obs$et0_sympt_sup_4[obs$et0.symptomes > 4] <- 1
+
+to_use <- c("et0.symptomes", "ftsw.dormance", "auc_isv.symptomes", "sum.days.isv.mod_sev.an", "tv.deb_end", "swi.deb_flo", "tv.deb_end", "swi.deb_flo", "sum.heat.days.30.dormance", "rr.dormance") # , "RU"
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "ftsw.symptomes", "cepage", "region_viticole", "age_10_15", "age_15_25", "age_25_30", "ftsw_sympt_inf_0_4", "ftsw_sympt_sup_0_4", "et0_sympt_inf_4", "et0_sympt_sup_4")
+obs <- obs[,to_keep]
+obs[,2:13] <- scale(obs[,2:13] ) 
+```
+
+```{r}
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_parcelle_estime:age_10_15 + age_parcelle_estime:age_15_25 + age_parcelle_estime:age_25_30 + ftsw.symptomes:ftsw_sympt_sup_0_4 + ftsw.symptomes:ftsw_sympt_inf_0_4 + et0.symptomes:et0_sympt_inf_4 + et0.symptomes:et0_sympt_sup_4") # Effet d'intéraction sans effet fixe
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects, " + (1|region_viticole)")) # verif que + (1|cepage)
+
+# RMSE test : 4.636034
+# Erreur moyenne absolue test :3.026398
+```
+
+```{r}
+i_train = sample(1:dim(obs)[1], replace = FALSE, size = dim(obs)[1]*0.8)
+model_lm <- glmer(form, data = obs[i_train, ])
+print("RMSE train :")
+rmse(obs$pourcentage_esca[i_train], predict(model_lm, obs[i_train, -1]))
+print("Erreur moyenne absolue train :")
+mean(abs(obs$pourcentage_esca[i_train] - predict(model_lm, obs[i_train, -1])))
+print("RMSE test :")
+rmse(obs$pourcentage_esca[-i_train], predict(model_lm, obs[-i_train, -1]))
+print("Erreur moyenne absolue test :")
+mean(abs(obs$pourcentage_esca[-i_train] - predict(model_lm, obs[-i_train, -1])))
+
+plot(obs$pourcentage_esca[-i_train], abs(obs$pourcentage_esca[-i_train] - predict(model_lm, obs[-i_train, -1])),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs$pourcentage_esca[-i_train], predict(model_lm, obs[-i_train , -1]),
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+```{r}
+coef(model_lm)
+```
+
+### Un modèle par région :
+
+```{r}
+obs <- observations
+obs$age_10_20 <- 0
+obs$age_10_20[obs$age_parcelle_estime <= 20] <- 1
+
+obs$age_20_30 <- 0
+obs$age_20_30[obs$age_parcelle_estime > 20] <- 1
+
+# obs$age_10_15 <- 0
+# obs$age_10_15[obs$age_parcelle_estime <= 15] <- 1
+# 
+# obs$age_15_25 <- 0
+# obs$age_15_25[obs$age_parcelle_estime > 15 & obs$age_parcelle_estime <= 25] <- 1
+# 
+# obs$age_25_30 <- 0
+# obs$age_25_30[obs$age_parcelle_estime > 25] <- 1
+
+to_use <- c("et0.symptomes", "ftsw.dormance", "auc_isv.symptomes", "sum.days.isv.mod_sev.an", "tv.deb_end", "swi.deb_flo", "tv.deb_end", "swi.deb_flo", "sum.heat.days.30.dormance", "rr.dormance") # , "RU"
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "ftsw.symptomes", "cepage", "region_viticole", "age_10_20", "age_20_30")
+obs <- obs[,to_keep]
+obs[,2:13] <- scale(obs[,2:13] ) 
+```
+
+```{r}
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_parcelle_estime:age_10_20 + age_parcelle_estime:age_20_30 + age_10_20 + age_20_30") #
+# + ftsw.symptomes:ftsw_sympt_sup_0_4 + ftsw.symptomes:ftsw_sympt_inf_0_4 + et0.symptomes:et0_sympt_inf_4 + et0.symptomes:et0_sympt_sup_4 : pas très utile ici
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+
+# Bourgogne : un seul cépage :
+
+effects_charentes <- paste(to_use, collapse = " + ")
+effects_charentes <- paste0(effects_charentes, " + age_parcelle_estime:age_10_20 + age_parcelle_estime:age_20_30 + age_10_20 + age_20_30")
+form_charentes <- as.formula(paste("pourcentage_esca ~", effects_charentes))
+```
+
+```{r}
+rmse = c()
+mae = c()
+r2s = c()
+for(region in unique(observations$region_viticole)){ 
+  print(region)
+  data <- obs[obs$region_viticole == region, c("pourcentage_esca", to_keep)]
+  rownames(data) <- NULL
+  i_train = sample(1:dim(data)[1], replace = FALSE, size = dim(data)[1]*0.8)
+  if(region %in% c("Charentes")) model_lm <- lm(form_charentes, data = data[i_train, ])
+  else model_lm <- lmer(form, data = data[i_train, ])
+  pred = predict(model_lm, data[-i_train ,-c(1)])
+  rmse = c(rmse, round(rmse(data$pourcentage_esca[-i_train], pred),3))
+  mae = c(mae, mean(abs(data$pourcentage_esca[-i_train] - pred)))
+  r2s = c(r2s, cor(data$pourcentage_esca[-i_train], pred)^2)
+}
+
+res = data.frame(region_viticole = unique(obs$region_viticole), rmse_test = rmse, mae_test = mae, r2_test = r2s)
+```
+
+
+```{r}
+coef(model_lm)
+```
+
+## Un modèle par région
+
+```{r}
+load("../../data/modelisation/observations.RData")
+
+observations$region_viticole[observations$region_viticole %in% c("Cotes-du-Rhone nord", "Cotes-du-Rhone sud")] <- "Cotes-du-Rhone"
+observations$cepage <- as.factor(observations$cepage)
+observations$region_viticole <- as.factor(observations$region_viticole)
+
+# Enlever les couples cépages / région < 20 observations :
+# Cotes-du-Rhone : muscat petits grains, cinsault, gamay
+# Languedoc : carignan, cabernet franc, cabernet sauvignon, chardonnay, mourvedre, muscat petits grains, pinot noir, sauvignon blanc : ne reste plus rien
+
+# Bourgogne : meunier
+# Charentes : cabernet sauvignon
+# Champagne : pinot noir
+
+observations <- observations[!(observations$region_viticole %in% c("Languedoc")),]
+observations <- observations[!(observations$region_viticole == "Cotes-du-Rhone" & observations$cepage %in% c("muscat petits grains", "cinsault", "gamay")),]
+observations <- observations[!(observations$region_viticole == "Bourgogne" & observations$cepage == "meunier"),]
+observations <- observations[!(observations$region_viticole == "Charentes" & observations$cepage == "cabernet sauvignon"),]
+observations <- observations[!(observations$region_viticole == "Champagne" & observations$cepage == "pinot noir"),]
+table(observations$region_viticole, observations$cepage)
+```
+
+```{r}
+observations$age_10_20 <- 0
+observations$age_10_20[observations$age_parcelle_estime <= 20] <- 1
+
+observations$age_20_30 <- 0
+observations$age_20_30[observations$age_parcelle_estime > 20] <- 1
+```
+
+### Alsace
+
+```{r}
+obs_region <- observations[observations$region_viticole == "Alsace",]
+to_use <- c("hu.deb_end", "VPD.deb_end", "isv.mod_sev.seq.5.symptomes", "isv.fai_mod.seq.15.symptomes")
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "age_10_20", "age_20_30")
+obs_region <- obs_region[,to_keep]
+
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+```
+
+```{r}
+i_train = sample(1:dim(obs_region)[1], replace = FALSE, size = dim(obs_region)[1]*0.8)
+model_lm <- glmer(form, data = obs_region[i_train, ])
+pred_train <- predict(model_lm, obs_region[i_train, -1])
+pred_test <- predict(model_lm, obs_region[-i_train, -1])
+
+print("RMSE train :")
+rmse(obs_region$pourcentage_esca[i_train], pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(obs_region$pourcentage_esca[i_train] - pred_train))
+print("R2 train :")
+cor(obs_region$pourcentage_esca[i_train], pred_train)^2
+print("RMSE test :")
+rmse(obs_region$pourcentage_esca[-i_train], pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(obs_region$pourcentage_esca[-i_train] - pred_test))
+print("R2 test :")
+cor(obs_region$pourcentage_esca[-i_train], pred_test)^2
+
+plot(obs_region$pourcentage_esca[-i_train], abs(obs_region$pourcentage_esca[-i_train] - pred_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs_region$pourcentage_esca[-i_train], pred_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+```{r}
+# Ajuster le modèle sur l'ensemble des observations :
+# alsace_lm <- glmer(form, data = obs_region)
+# # Enregistrer le modèle :
+# saveRDS(alsace_lm, "../../modeles/alsace_lm.rds") # Pour l'utiliser : alsace_lm <- readRDS("../../modeles/alsace_lm.rds")
+# 
+# save(alsace_lm, file = "../../modeles/alsace_lm.Rdata") # Pour l'utiliser : alsace_lm <- load("../../modeles/alsace_lm.Rdata")
+```
+
+
+### Bordelais
+
+```{r}
+obs_region <- observations[observations$region_viticole == "Bordelais",]
+to_use <- c("hu.deb_end", "VPD.deb_end", "tn.deb_end", "tv.deb_flo", "et0.deb_flo")
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "age_10_20", "age_20_30")
+obs_region <- obs_region[,to_keep]
+
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+```
+
+```{r}
+i_train = sample(1:dim(obs_region)[1], replace = FALSE, size = dim(obs_region)[1]*0.8)
+model_lm <- glmer(form, data = obs_region[i_train, ])
+pred_train <- predict(model_lm, obs_region[i_train, -1])
+pred_test <- predict(model_lm, obs_region[-i_train, -1])
+
+print("RMSE train :")
+rmse(obs_region$pourcentage_esca[i_train], pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(obs_region$pourcentage_esca[i_train] - pred_train))
+print("R2 train :")
+cor(obs_region$pourcentage_esca[i_train], pred_train)^2
+print("RMSE test :")
+rmse(obs_region$pourcentage_esca[-i_train], pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(obs_region$pourcentage_esca[-i_train] - pred_test))
+print("R2 test :")
+cor(obs_region$pourcentage_esca[-i_train], pred_test)^2
+
+plot(obs_region$pourcentage_esca[-i_train], abs(obs_region$pourcentage_esca[-i_train] - pred_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs_region$pourcentage_esca[-i_train], pred_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+### Bourgogne
+
+```{r}
+obs_region <- observations[observations$region_viticole == "Bourgogne",]
+to_use <- c("isv.an", "bh0.an", "bhv.an", "bh.an", "et0.an", "swi.dormance")
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "age_10_20", "age_20_30")
+obs_region <- obs_region[,to_keep]
+
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+```
+
+```{r}
+i_train = sample(1:dim(obs_region)[1], replace = FALSE, size = dim(obs_region)[1]*0.8)
+model_lm <- glmer(form, data = obs_region[i_train, ])
+pred_train <- predict(model_lm, obs_region[i_train, -1])
+pred_test <- predict(model_lm, obs_region[-i_train, -1])
+
+print("RMSE train :")
+rmse(obs_region$pourcentage_esca[i_train], pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(obs_region$pourcentage_esca[i_train] - pred_train))
+print("R2 train :")
+cor(obs_region$pourcentage_esca[i_train], pred_train)^2
+print("RMSE test :")
+rmse(obs_region$pourcentage_esca[-i_train], pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(obs_region$pourcentage_esca[-i_train] - pred_test))
+print("R2 test :")
+cor(obs_region$pourcentage_esca[-i_train], pred_test)^2
+
+plot(obs_region$pourcentage_esca[-i_train], abs(obs_region$pourcentage_esca[-i_train] - pred_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs_region$pourcentage_esca[-i_train], pred_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+### Champagne
+
+```{r}
+obs_region <- observations[observations$region_viticole == "Champagne",]
+to_use <- c("sum.days.isv.mod_sev.an", "sum.days.isv.sev.an", "et0.dormance")
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "age_10_20", "age_20_30")
+obs_region <- obs_region[,to_keep]
+
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+```
+
+```{r}
+i_train = sample(1:dim(obs_region)[1], replace = FALSE, size = dim(obs_region)[1]*0.8)
+model_lm <- glmer(form, data = obs_region[i_train, ])
+pred_train <- predict(model_lm, obs_region[i_train, -1])
+pred_test <- predict(model_lm, obs_region[-i_train, -1])
+
+print("RMSE train :")
+rmse(obs_region$pourcentage_esca[i_train], pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(obs_region$pourcentage_esca[i_train] - pred_train))
+print("R2 train :")
+cor(obs_region$pourcentage_esca[i_train], pred_train)^2
+print("RMSE test :")
+rmse(obs_region$pourcentage_esca[-i_train], pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(obs_region$pourcentage_esca[-i_train] - pred_test))
+print("R2 test :")
+cor(obs_region$pourcentage_esca[-i_train], pred_test)^2
+
+plot(obs_region$pourcentage_esca[-i_train], abs(obs_region$pourcentage_esca[-i_train] - pred_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs_region$pourcentage_esca[-i_train], pred_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+### Charentes
+
+```{r}
+# Plus qu'une région
+obs_region <- observations[observations$region_viticole == "Charentes",]
+to_use <- c("hu.deb_end", "VPD.deb_end", "rr.deb_end")
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "age_10_20", "age_20_30")
+obs_region <- obs_region[,to_keep]
+
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+```
+
+```{r}
+i_train = sample(1:dim(obs_region)[1], replace = FALSE, size = dim(obs_region)[1]*0.8)
+model_lm <- lm(form, data = obs_region[i_train, ])
+pred_train <- predict(model_lm, obs_region[i_train, -1])
+pred_test <- predict(model_lm, obs_region[-i_train, -1])
+
+print("RMSE train :")
+rmse(obs_region$pourcentage_esca[i_train], pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(obs_region$pourcentage_esca[i_train] - pred_train))
+print("R2 train :")
+cor(obs_region$pourcentage_esca[i_train], pred_train)^2
+print("RMSE test :")
+rmse(obs_region$pourcentage_esca[-i_train], pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(obs_region$pourcentage_esca[-i_train] - pred_test))
+print("R2 test :")
+cor(obs_region$pourcentage_esca[-i_train], pred_test)^2
+
+plot(obs_region$pourcentage_esca[-i_train], abs(obs_region$pourcentage_esca[-i_train] - pred_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs_region$pourcentage_esca[-i_train], pred_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+### Cotes-du-Rhone
+
+```{r}
+obs_region <- observations[observations$region_viticole == "Cotes-du-Rhone",]
+to_use <- c("isv.sev.seq.10.an")
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "age_10_20", "age_20_30")
+obs_region <- obs_region[,to_keep]
+
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+```
+
+```{r}
+i_train = sample(1:dim(obs_region)[1], replace = FALSE, size = dim(obs_region)[1]*0.8)
+model_lm <- glmer(form, data = obs_region[i_train, ])
+pred_train <- predict(model_lm, obs_region[i_train, -1])
+pred_test <- predict(model_lm, obs_region[-i_train, -1])
+
+print("RMSE train :")
+rmse(obs_region$pourcentage_esca[i_train], pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(obs_region$pourcentage_esca[i_train] - pred_train))
+print("R2 train :")
+cor(obs_region$pourcentage_esca[i_train], pred_train)^2
+print("RMSE test :")
+rmse(obs_region$pourcentage_esca[-i_train], pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(obs_region$pourcentage_esca[-i_train] - pred_test))
+print("R2 test :")
+cor(obs_region$pourcentage_esca[-i_train], pred_test)^2
+
+plot(obs_region$pourcentage_esca[-i_train], abs(obs_region$pourcentage_esca[-i_train] - pred_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs_region$pourcentage_esca[-i_train], pred_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+### Jura
+
+```{r}
+obs_region <- observations[observations$region_viticole == "Jura",]
+to_use <- c("swi.symptomes", "rr.dormance", "bh.deb_end", "bhv.deb_end", "auc_isv", "bh0.deb_end", "isv.deb_end", "ftsw.deb_end")
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "age_10_20", "age_20_30")
+obs_region <- obs_region[,to_keep]
+
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+```
+
+```{r}
+i_train = sample(1:dim(obs_region)[1], replace = FALSE, size = dim(obs_region)[1]*0.8)
+model_lm <- glmer(form, data = obs_region[i_train, ])
+pred_train <- predict(model_lm, obs_region[i_train, -1])
+pred_test <- predict(model_lm, obs_region[-i_train, -1])
+
+print("RMSE train :")
+rmse(obs_region$pourcentage_esca[i_train], pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(obs_region$pourcentage_esca[i_train] - pred_train))
+print("R2 train :")
+cor(obs_region$pourcentage_esca[i_train], pred_train)^2
+print("RMSE test :")
+rmse(obs_region$pourcentage_esca[-i_train], pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(obs_region$pourcentage_esca[-i_train] - pred_test))
+print("R2 test :")
+cor(obs_region$pourcentage_esca[-i_train], pred_test)^2
+
+plot(obs_region$pourcentage_esca[-i_train], abs(obs_region$pourcentage_esca[-i_train] - pred_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs_region$pourcentage_esca[-i_train], pred_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+### Provence
+
+```{r}
+obs_region <- observations[observations$region_viticole == "Provence",]
+to_use <- c("isv.sev.seq.10.dormance")
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "age_10_20", "age_20_30")
+obs_region <- obs_region[,to_keep]
+
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+```
+
+```{r}
+i_train = sample(1:dim(obs_region)[1], replace = FALSE, size = dim(obs_region)[1]*0.8)
+model_lm <- glmer(form, data = obs_region[i_train, ])
+pred_train <- predict(model_lm, obs_region[i_train, -1])
+pred_test <- predict(model_lm, obs_region[-i_train, -1])
+
+print("RMSE train :")
+rmse(obs_region$pourcentage_esca[i_train], pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(obs_region$pourcentage_esca[i_train] - pred_train))
+print("R2 train :")
+cor(obs_region$pourcentage_esca[i_train], pred_train)^2
+print("RMSE test :")
+rmse(obs_region$pourcentage_esca[-i_train], pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(obs_region$pourcentage_esca[-i_train] - pred_test))
+print("R2 test :")
+cor(obs_region$pourcentage_esca[-i_train], pred_test)^2
+
+plot(obs_region$pourcentage_esca[-i_train], abs(obs_region$pourcentage_esca[-i_train] - pred_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs_region$pourcentage_esca[-i_train], pred_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+### Val de Loire
+
+```{r}
+obs_region <- observations[observations$region_viticole == "Val de Loire",]
+to_use <- c("VPD.deb_end", "VPD.symptomes", "rr.deb_end", "tm.deb_end", "tx.deb_end", "bh0.dormance", "bhv.dormance", "RU", "isv.symptomes", "ftsw.symptomes")
+to_keep <- c("pourcentage_esca",to_use, "age_parcelle_estime", "cepage", "age_10_20", "age_20_30")
+obs_region <- obs_region[,to_keep]
+
+effects <- paste(to_use, collapse = " + ")
+effects <- paste0(effects, " + age_10_20 + age_parcelle_estime:age_10_20 + age_20_30 + age_parcelle_estime:age_20_30")
+effects <- paste0("(", effects, "|cepage)")
+form <- as.formula(paste("pourcentage_esca ~", effects))
+```
+
+```{r}
+i_train = sample(1:dim(obs_region)[1], replace = FALSE, size = dim(obs_region)[1]*0.8)
+model_lm <- glmer(form, data = obs_region[i_train, ])
+pred_train <- predict(model_lm, obs_region[i_train, -1])
+pred_test <- predict(model_lm, obs_region[-i_train, -1])
+
+print("RMSE train :")
+rmse(obs_region$pourcentage_esca[i_train], pred_train)
+print("Erreur moyenne absolue train :")
+mean(abs(obs_region$pourcentage_esca[i_train] - pred_train))
+print("R2 train :")
+cor(obs_region$pourcentage_esca[i_train], pred_train)^2
+print("RMSE test :")
+rmse(obs_region$pourcentage_esca[-i_train], pred_test)
+print("Erreur moyenne absolue test :")
+mean(abs(obs_region$pourcentage_esca[-i_train] - pred_test))
+print("R2 test :")
+cor(obs_region$pourcentage_esca[-i_train], pred_test)^2
+
+plot(obs_region$pourcentage_esca[-i_train], abs(obs_region$pourcentage_esca[-i_train] - pred_test),
+     xlab = "Incidence d'esca", ylab = "Erreur absolue", 
+     main = "Erreur selon l'incidence d'esca, glm variables seléctionnées")
+
+plot(obs_region$pourcentage_esca[-i_train], pred_test,
+     xlab = "Incidence d'esca", ylab = "Prédiction", 
+     main = "Prédiction selon l'incidence d'esca, glm variables seléctionnées")
+```
+
+
