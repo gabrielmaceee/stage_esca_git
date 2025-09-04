@@ -1,0 +1,620 @@
+---
+title: "Répresentativité des données ESV"
+author: "Gabriel Macé"
+date: "2025-07-31"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+```{r}
+library(RPostgres) # lecture BDDesca
+library(readxl) # lecture BDDesca
+library(writexl)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(stringr) # Manipulation des chaines de caractères
+library(patchwork)
+```
+
+## Récupération des données
+
+
+```{r, eval=FALSE}
+# 
+# # -------------------------------------------------------------------------- #
+# # Connect BDD ESCA ----
+# # -------------------------------------------------------------------------- #
+# Penser à activer le VPN globalProtect
+con_PROPRE <- RPostgres::dbConnect(
+  RPostgres::Postgres(),
+  host = "bdd-private.plateforme-esv.fr",
+  port = "5432",
+  dbname = "PROPRE", # remplacer par le nom de la BDD (BRUT, PROPRE...)
+  user = Sys.getenv("USERNAME_BDD"),
+  password = Sys.getenv("PASSWORD_BDD")
+)
+#
+# variables à garder (nom colonnes) dans la BBD
+var2kip <- c("annee", "code_commune_INSEE", "nom_region", "cepage", "nombre_ceps_total",
+             "identifiant_parcelle_analyse", "age_parcelle_estime",
+             "pourcentage_esca", "organisme_notateur", "nom_bassin_viti2")
+observatoire <- RPostgres::dbReadTable(con_PROPRE, Id(schema = "ESCA",table = "BDD_ESCA_MAJ"))[,var2kip]
+
+write.csv(observatoire, "../../data/representativite_observatoire/observatoire.csv", row.names=FALSE)
+```
+
+```{r}
+observatoire = read.csv("../../data/representativite_observatoire/observatoire.csv")
+# Ici, garder que les années 2017 et 2023
+observatoire <- observatoire[observatoire$annee %in% c(2017, 2023),]
+
+# Garder que les variables qui sont aussi dans cvi :
+observatoire <- observatoire[, c("annee", "cepage", "age_parcelle_estime", "nom_bassin_viti2")]
+```
+
+```{r}
+## Données CVI :
+load("../../data/representativite_observatoire/CVI.RData")
+
+# Garder que les variables d'intérêt :
+cvi_2017 <- cvi_2017[,c("nom_bassin", "annee_CVI", "libelle_cepage", "campagne_plantation")]
+cvi_2023 <- cvi_2023[,c("nom_bassin", "annee_CVI", "libelle_cepage", "campagne_plantation")]
+
+cvi <- rbind(cvi_2017, cvi_2023)
+
+# Enlever les bassins viticole qui ne correspondent pas :
+cvi <- cvi %>% filter(nom_bassin != "Hors-Bassin")
+observatoire <- observatoire %>% filter(!nom_bassin_viti2 %in% c("Champagne", "Jura"))
+```
+
+```{r}
+# Calculer l'âge des parcelles :
+## Récuperer l'année de plantation : la deuxième année de la campagne
+cvi$campagne_plantation <- as.numeric(substr(cvi$campagne_plantation, 1,4))
+# Calcul de l'âge
+cvi$age <- cvi$annee_CVI - cvi$campagne_plantation 
+
+cvi <- cvi %>% filter(age >= 0)
+```
+
+## Homogénéisation des noms des cépages
+
+```{r}
+# mettre tout en minuscule
+cvi$libelle_cepage <- str_to_lower(cvi$libelle_cepage)
+observatoire$cepage <- str_to_lower(observatoire$cepage)
+```
+
+
+```{r}
+# Vecteur des cépages de référence
+cepages <- unique(observatoire$cepage)
+
+# Fonction qui cherche une correspondance partielle dans les noms du premier dataset
+trouver_correspondance <- function(nom_cvi) {
+  if (is.na(nom_cvi)) {
+    return(NA_character_)
+  }
+  
+  correspondances <- str_detect(nom_cvi, fixed(cepages, ignore_case = TRUE))
+  if (sum(correspondances) >= 1) {
+    # Renvoie le premier cépage correspondant
+    return(cepages[which(correspondances)[1]])
+  } else {
+    # Sinon on garde le nom original
+    return(nom_cvi)
+  }
+}
+
+# Appliquer cette fonction à toute la colonne
+cvi <- cvi %>%
+  mutate(libelle_cepage = map_chr(libelle_cepage, trouver_correspondance))
+```
+
+```{r}
+# write_xlsx(data.frame(ESV = unique(observatoire$cepage)), "../../data/representativite_observatoire/nom_cepage.xlsx")
+# write_xlsx(data.frame(CVI = unique(cvi$libelle_cepage)), "../../data/representativite_observatoire/nom_cepage_cvi.xlsx")
+```
+
+```{r}
+cvi <- cvi %>% 
+  mutate(libelle_cepage = replace(libelle_cepage, libelle_cepage == "auxerrois b", "pinot auxerrois"))
+cvi <- cvi %>% 
+  mutate(libelle_cepage = replace(libelle_cepage, libelle_cepage == "pinot blanc b", "pinot auxerrois"))
+cvi <- cvi %>% 
+  mutate(libelle_cepage = replace(libelle_cepage, libelle_cepage == "sciaccarello n", "sciaccarellu"))
+cvi <- cvi %>% 
+  mutate(libelle_cepage = replace(libelle_cepage, libelle_cepage == "vermentino b", "vermentinu"))
+cvi <- cvi %>% 
+  mutate(libelle_cepage = replace(libelle_cepage, libelle_cepage == "sauvignon b", "sauvignon blanc"))
+
+# Enlever le bassin viticole sud Ouest car pas dans la bdd ESV :
+cvi <- cvi %>% filter(nom_bassin != "Sud-Ouest")
+# Enlever la valléee du Rhône car que 2 observations dans esv
+cvi <- cvi %>% filter(nom_bassin != "Vallée du Rhône")
+observatoire <- observatoire %>% filter(nom_bassin_viti2 != "Vallée du Rhône")
+```
+
+Pour la suite, nous n'utilisons que les régions communes entre les deux bdd :
+
+"Alsace", "Aquitaine", "Bourgogne", "Cognac", "Corse", "Languedoc", "Sud-Ouest", "Val de Loire".
+
+Nous utiliserons des tests de proportion pour comparer l'égalité des probabilités des modalités des âges et des cépages selon l'origine des données : cvi : base de référence, et esv : base de surveillance de l'esca.
+
+L'hypothèse nulle de ce test est : $H_0 : $ Les probabilités d'appariton de l'ensemble des modalités sont égales dans les deux populations.
+
+Nous commencerons par comparer les proportions d'âges et des cépages de ces deux populations sur l'ensemble des régions ensemble, puis chaque région séparement, et ceci pour 2017 et 2023.
+
+NB : Pour les graphiques de répartition des cépages, nous prenons que les cépages présents dans la base esv, mais ils sont bien tous pris en compte dans le test de proportion.
+
+## Comparaison sur l'ensemble de nos bassins viticole : 
+
+
+```{r}
+cvi$origine <- "CVI"
+observatoire$origine <- "Observatoire maladies du bois"
+# write_xlsx(data.frame(ESV = unique(observatoire$cepage)), "../../data/representativite_observatoire/nom_cepage_diminue.xlsx")
+# write_xlsx(data.frame(CVI = unique(cvi$libelle_cepage)), "../../data/representativite_observatoire/nom_cepage_cvi2.xlsx")
+```
+
+```{r}
+observatoire[observatoire$nom_bassin_viti2 == "Charentes", ]$nom_bassin_viti2 <- "Cognac"
+observatoire[observatoire$nom_bassin_viti2 == "Bordelais", ]$nom_bassin_viti2 <- "Aquitaine"
+observatoire[observatoire$nom_bassin_viti2 == "Lorraine", ]$nom_bassin_viti2 <- "Alsace"
+
+cvi_2017 <- cvi %>% filter(annee_CVI == 2017)
+cvi_2023 <- cvi %>% filter(annee_CVI == 2023)
+
+observatoire_2017 <- observatoire %>% filter(annee == 2017)
+observatoire_2023 <- observatoire %>% filter(annee == 2023)
+```
+
+
+```{r}
+to_plot_2017 <- rbind(observatoire_2017[, c("annee", "cepage", "age_parcelle_estime", "nom_bassin_viti2", "origine")], setNames(cvi_2017[, c("annee_CVI", "libelle_cepage", "age", "nom_bassin", "origine")], c("annee", "cepage", "age_parcelle_estime", "nom_bassin_viti2", "origine")))
+
+
+to_plot_2023 <- rbind(observatoire_2023[, c("annee", "cepage", "age_parcelle_estime", "nom_bassin_viti2", "origine")], setNames(cvi_2023[, c("annee_CVI", "libelle_cepage", "age", "nom_bassin", "origine")], c("annee", "cepage", "age_parcelle_estime", "nom_bassin_viti2", "origine")))
+```
+
+### Age :
+
+```{r}
+### 2017 :
+# H0 : égalité des probabilités
+# 1. Créer la table de contingence : lignes = classes d'âge, colonnes = origines
+contingence <- to_plot_2017 %>%
+  filter(!is.na(age_parcelle_estime)) %>%
+  count(age_parcelle_estime, origine) %>%
+  tidyr::pivot_wider(names_from = origine, values_from = n, values_fill = 0) %>%
+  tibble::column_to_rownames("age_parcelle_estime")
+
+# 2. Convertir en matrice
+mat <- as.matrix(contingence)
+# 3. Appliquer le test d’égalité des proportions global (sur toutes les lignes)
+#    => attention : prop.test attend les *colonnes* comme groupes
+test_prop <- prop.test(mat) # Faire une anova plutôt non ?
+pv_age_2017 <- test_prop$p.value
+print(paste0("2017", " : ","pv test de proportion : ",  pv_age_2017))
+
+
+### 2023 :
+
+# 1. Créer la table de contingence : lignes = classes d'âge, colonnes = origines
+contingence <- to_plot_2023 %>%
+  filter(!is.na(age_parcelle_estime)) %>%
+  count(age_parcelle_estime, origine) %>%
+  tidyr::pivot_wider(names_from = origine, values_from = n, values_fill = 0) %>%
+  tibble::column_to_rownames("age_parcelle_estime")
+
+# 2. Convertir en matrice
+mat <- as.matrix(contingence)
+
+# 3. Appliquer le test d’égalité des proportions global (sur toutes les lignes)
+#    => attention : prop.test attend les *colonnes* comme groupes
+test_prop <- prop.test(mat)
+pv_age_2023 <- test_prop$p.value
+print(paste0("2023", " : ","pv test de proportion : ",  pv_age_2023))
+```
+
+```{r}
+age_dist_2017 <- to_plot_2017 %>% 
+  filter(!is.na(age_parcelle_estime)) %>%
+  group_by(age_parcelle_estime, origine) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(origine) %>%
+  mutate(proportion = count / sum(count))
+
+dens_2017 <- ggplot(to_plot_2017 %>% filter(!is.na(age_parcelle_estime)),
+       aes(x = age_parcelle_estime, color = origine, fill = origine)) +
+  geom_density(alpha = 0.4, size = 1.2, adjust = 1.2) +
+  labs(title = paste0("2017", " (pv = ", round(pv_age_2017,3), ")"),
+       x = "Âge estimé",
+       y = "Densité",
+       fill = "Origine",
+       color = "Origine") + 
+  theme(axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), legend.position="none",
+        plot.title = element_text(color = "grey40", face = "plain"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold")) 
+
+
+age_dist_2023 <- to_plot_2023 %>% 
+  filter(!is.na(age_parcelle_estime)) %>%
+  group_by(age_parcelle_estime, origine) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(origine) %>%
+  mutate(proportion = count / sum(count))
+
+dens_2023 <- ggplot(to_plot_2023 %>% filter(!is.na(age_parcelle_estime)),
+       aes(x = age_parcelle_estime, color = origine, fill = origine)) +
+  geom_density(alpha = 0.4, size = 1.2, adjust = 1.2) +
+  labs(title = paste0("2023", " (pv = ", round(pv_age_2023,3), ")"),
+       x = "Âge estimé",
+       y = "",
+       fill = "Origine",
+       color = "Origine") +
+  theme(axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), legend.position="none",
+        plot.title = element_text(color = "grey40", face = "plain"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"))
+```
+
+```{r}
+wrap_plots(list(dens_2017, dens_2023), ncol = 2, guides = "collect") + plot_annotation("Proportion des âges sur l'ensemble de nos bassins et test d'égalité des proportions", theme=theme(plot.title=element_text(hjust=0.5))) & theme(legend.position = "bottom")
+```
+
+
+### Cépages
+
+```{r}
+### 2017 :
+# H0 : égalité des probabilités
+# 1. Créer la table de contingence : lignes = classes d'âge, colonnes = origines
+contingence <- to_plot_2017 %>%
+  filter(!is.na(cepage)) %>%
+  count(cepage, origine) %>%
+  tidyr::pivot_wider(names_from = origine, values_from = n, values_fill = 0) %>%
+  tibble::column_to_rownames("cepage")
+
+# 2. Convertir en matrice
+mat <- as.matrix(contingence)
+# 3. Appliquer le test d’égalité des proportions global (sur toutes les lignes)
+#    => attention : prop.test attend les *colonnes* comme groupes
+test_prop <- prop.test(mat) # Faire une anova plutôt non ?
+pv_cepage_2017 <- test_prop$p.value
+print(paste0("2017", " : ","pv test de proportion : ", pv_cepage_2017 ))
+
+### 2023 :
+
+# 1. Créer la table de contingence : lignes = classes d'âge, colonnes = origines
+contingence <- to_plot_2023 %>%
+  filter(!is.na(cepage)) %>%
+  count(cepage, origine) %>%
+  tidyr::pivot_wider(names_from = origine, values_from = n, values_fill = 0) %>%
+  tibble::column_to_rownames("cepage")
+
+# 2. Convertir en matrice
+mat <- as.matrix(contingence)
+
+# 3. Appliquer le test d’égalité des proportions global (sur toutes les lignes)
+#    => attention : prop.test attend les *colonnes* comme groupes
+test_prop <- prop.test(mat)
+pv_cepage_2023 <- test_prop$p.value
+print(paste0("2023", " : ","pv test de proportion : ", pv_cepage_2023))
+```
+
+```{r}
+# Quantifier le nombre que l'on enlève en gardant que NOS cépages
+cepage_dist_2017 <- to_plot_2017 %>% 
+  filter(!is.na(cepage)) %>%
+  filter(cepage %in% cepages) %>%
+  group_by(cepage, origine) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(origine) %>%
+  mutate(proportion = count / sum(count))
+
+hist_2017 <- ggplot(cepage_dist_2017, aes(x = cepage, y = proportion, fill = origine)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = paste0("2017", " (pv = ", round(pv_cepage_2017,3), ")"),
+       x = "Cépage",
+       y = "Proportion",
+       fill = "Jeu de données") +
+  theme(axis.text.x = element_text(angle = 90,size = 12), axis.text.y = element_text(size = 12), legend.position="none",
+        plot.title = element_text(color = "grey40", face = "plain"),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14)) +
+  scale_y_continuous(labels = scales::percent_format())
+
+cepage_dist_2023 <- to_plot_2023 %>% 
+  filter(!is.na(cepage)) %>%
+  filter(cepage %in% cepages) %>%
+  group_by(cepage, origine) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(origine) %>%
+  mutate(proportion = count / sum(count))
+
+hist_2023 <- ggplot(cepage_dist_2023, aes(x = cepage, y = proportion, fill = origine)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = paste0("2023", " (pv = ", round(pv_cepage_2023,3), ")"),
+       x = "Cépage",
+       y = "",
+       fill = "Jeu de données") +
+  theme(axis.text.x = element_text(angle = 90,size = 12), axis.text.y = element_text(size = 12), legend.position="none",
+        plot.title = element_text(color = "grey40", face = "plain"),
+        axis.title.x = element_text(face = "bold", size = 14),
+        axis.title.y = element_text(face = "bold", size = 14)) +
+  scale_y_continuous(labels = scales::percent_format())
+
+
+# ---- Combinaison avec patchwork ----
+wrap_plots(list(hist_2017,hist_2023), ncol = 2, guides = "collect") + plot_annotation("Proportion des cépages sur l'ensemble de nos bassins et test d'égalité des proportions", theme=theme(plot.title=element_text(hjust=0.5))) & theme(legend.position = "bottom")
+```
+
+## Par bassin viticole 
+
+### Âge
+
+#### 2017
+
+```{r}
+bassins <- sort(setdiff(unique(to_plot_2017$nom_bassin_viti2), c("Sud-Ouest")))
+plot_list <- list()
+i=0
+for(bassin in bassins){
+  
+  contingence <- to_plot_2017 %>%
+  filter(!is.na(age_parcelle_estime)) %>%
+  filter(nom_bassin_viti2 == bassin)
+  
+  if(length(unique(contingence$origine))==2){
+    i=i+1
+    
+    contingence <- to_plot_2017 %>%
+    filter(!is.na(age_parcelle_estime)) %>%
+    filter(nom_bassin_viti2 == bassin)
+    # pv_aov = summary(aov(age_parcelle_estime~origine,contingence))[[1]][["Pr(>F)"]][1]
+    
+    contingence <- contingence %>%
+    count(age_parcelle_estime, origine) %>%
+    tidyr::pivot_wider(names_from = origine, values_from = n, values_fill = 0) %>%
+    tibble::column_to_rownames("age_parcelle_estime")
+    mat <- as.matrix(contingence)
+    test_prop <- prop.test(mat) # Faire une anova plutôt non ?
+    
+    
+    print(paste0(bassin, " : ","pv test de proportion : ",  test_prop$p.value))
+    # print(paste0(bassin, " : ","pv anova : ",  pv_aov))
+  
+    p <- ggplot(to_plot_2017 %>% filter(!is.na(age_parcelle_estime)) %>% filter(nom_bassin_viti2 == bassin),
+           aes(x = age_parcelle_estime, color = origine, fill = origine)) +
+      geom_density(alpha = 0.4, size = 1.2, adjust = 1.2) +
+      labs(title = paste0(bassin, " (pv = ", round(test_prop$p.value,3), ")"),
+            x = if (i >=5 ) "Âge estimé" else NULL,
+            y = if (i %in% c(1,5)) "Densité" else NULL,
+           fill = "Origine",
+           color = "Origine") + 
+      theme(axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), legend.position="none",
+        plot.title = element_text(color = "grey40", face = "plain"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"))
+    
+    plot_list[[i]] <- p
+  }
+  else print(paste0("Pas assez de données ESV pour : ", bassin, " en 2017"))
+}
+```
+
+```{r}
+# Combiner les plots avec patchwork
+# Le faire hors de markdown c'est plus joli
+wrap_plots(plot_list, ncol = 4, guides = "collect") + plot_annotation("2017 : Densité des âges par bassin viticole et test d'égalité des proportions", theme=theme(plot.title=element_text(hjust=0.5))) & theme(legend.position = "bottom")
+```
+
+#### 2023
+
+```{r}
+bassins <- sort(setdiff(unique(to_plot_2023$nom_bassin_viti2), c("Sud-Ouest")))
+plot_list <- list()
+i=0
+for(bassin in "Bourgogne"){
+  
+  contingence <- to_plot_2023 %>%
+  filter(!is.na(age_parcelle_estime)) %>%
+  filter(nom_bassin_viti2 == bassin)
+  
+  if(length(unique(contingence$origine))==2){
+    i=i+1
+    contingence <- contingence %>%
+    count(age_parcelle_estime, origine) %>%
+    tidyr::pivot_wider(names_from = origine, values_from = n, values_fill = 0) %>%
+    tibble::column_to_rownames("age_parcelle_estime")
+    mat <- as.matrix(contingence)
+    test_prop <- prop.test(mat) # Faire une anova plutôt non ?
+    print(paste0(bassin, " : ","pv test de proportion : ",  test_prop$p.value))
+  
+    p <- ggplot(to_plot_2023 %>% filter(!is.na(age_parcelle_estime)) %>% filter(nom_bassin_viti2 == bassin),
+           aes(x = age_parcelle_estime, color = origine, fill = origine)) +
+      geom_density(alpha = 0.4, size = 1.2, adjust = 1.2) +
+      labs(title = paste0(bassin, " (pv = ", round(test_prop$p.value,3), ")"),
+           x = if (i >=4 ) "Âge estimé" else NULL,
+            y = if (i %in% c(1,4)) "Densité" else NULL,
+           fill = "Origine",
+           color = "Origine") + 
+      theme(axis.text.x = element_text(size = 12), axis.text.y = element_text(size = 12), legend.position="none",
+        plot.title = element_text(color = "grey40", face = "plain"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold"))
+    plot_list[[i]] <- p
+  }
+  else print(paste0("Pas assez de données ESV pour : ", bassin, " en 2023"))
+}
+```
+
+```{r}
+# Combiner les plots avec patchwork
+# Le faire hors de markdown c'est plus joli
+wrap_plots(plot_list, ncol = 3, guides = "collect") + plot_annotation("2023 : Densité des âges par bassin viticole et test d'égalité des proportions", theme=theme(plot.title=element_text(hjust=0.5))) & theme(legend.position = "bottom")
+```
+
+
+### Cépage
+
+#### 2017
+```{r}
+bassins <- sort(setdiff(unique(to_plot_2017$nom_bassin_viti2), c("Sud-Ouest")))
+plot_list <- list()
+i=0
+for(bassin in bassins){
+  
+  contingence <- to_plot_2017 %>%
+  filter(!is.na(cepage)) %>%
+  filter(nom_bassin_viti2 == bassin)
+  
+  if(length(unique(contingence$origine))==2){
+    i=i+1
+    contingence <- contingence %>%
+    count(cepage, origine) %>%
+    tidyr::pivot_wider(names_from = origine, values_from = n, values_fill = 0) %>%
+    tibble::column_to_rownames("cepage")
+    mat <- as.matrix(contingence)
+    test_prop <- prop.test(mat) 
+    print(paste0(bassin, " : ","pv test de proportion : ",  test_prop$p.value))
+
+    
+    cepage_dist_2017 <- to_plot_2017 %>% 
+    filter(!is.na(cepage)) %>%
+    filter(cepage %in% cepages) %>%
+    filter(nom_bassin_viti2 == bassin) %>%
+    group_by(cepage, origine) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    group_by(origine) %>%
+    mutate(proportion = count / sum(count))
+    
+    
+    p <- ggplot(cepage_dist_2017, aes(x = cepage, y = proportion, fill = origine)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = paste0(bassin, " (pv = ", round(test_prop$p.value,3), ")"),
+       x = if (i >=5 ) "Cépage" else NULL,
+       y = if (i %in% c(1,5)) "Proportion" else NULL,
+       fill = "Origine") +
+  theme(axis.text.x = element_text(angle = 90, size = 10), axis.text.y = element_text(size = 12), legend.position="none",
+        plot.title = element_text(color = "grey40", face = "plain"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold")) +
+  scale_y_continuous(labels = scales::percent_format())
+    
+    
+    plot_list[[i]] <- p
+  }
+  else print(paste0("Pas assez de données ESV pour : ", bassin, " en 2017"))
+}
+```
+
+```{r}
+# Combiner les plots avec patchwork
+# Le faire hors de markdown c'est plus joli
+wrap_plots(plot_list, ncol = 4, guides = "collect") + plot_annotation("2017 : Proportion des cépages par bassin viticole et test d'égalité des proportions", theme=theme(plot.title=element_text(hjust=0.5))) & theme(legend.position = "bottom")
+```
+
+#### 2023
+
+```{r}
+bassins <- sort(setdiff(unique(to_plot_2023$nom_bassin_viti2), c("Sud-Ouest")))
+plot_list <- list()
+i=0
+for(bassin in bassins){
+  
+  contingence <- to_plot_2023 %>%
+  filter(!is.na(cepage)) %>%
+  filter(nom_bassin_viti2 == bassin)
+  
+  if(length(unique(contingence$origine))==2){
+    i=i+1
+    contingence <- contingence %>%
+    count(cepage, origine) %>%
+    tidyr::pivot_wider(names_from = origine, values_from = n, values_fill = 0) %>%
+    tibble::column_to_rownames("cepage")
+    mat <- as.matrix(contingence)
+    test_prop <- prop.test(mat) 
+    print(paste0(bassin, " : ","pv test de proportion : ",  test_prop$p.value))
+
+    
+    cepage_dist_2023 <- to_plot_2023 %>% 
+    filter(!is.na(cepage)) %>%
+    filter(cepage %in% cepages) %>%
+    filter(nom_bassin_viti2 == bassin) %>%
+    group_by(cepage, origine) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    group_by(origine) %>%
+    mutate(proportion = count / sum(count))
+    
+    
+    p <- ggplot(cepage_dist_2023, aes(x = cepage, y = proportion, fill = origine)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = paste0(bassin, " (pv = ", round(test_prop$p.value,3), ")"),
+       x = if (i >= 4 ) "Cépage" else NULL,
+       y = if (i %in% c(1,4)) "Proportion" else NULL,
+       fill = "Origine") +
+  theme(axis.text.x = element_text(angle = 90, size = 10), axis.text.y = element_text(size = 12), legend.position="none",
+        plot.title = element_text(color = "grey40", face = "plain"),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_text(face = "bold")) +
+  scale_y_continuous(labels = scales::percent_format())
+    
+    
+    plot_list[[i]] <- p
+  }
+  else print(paste0("Pas assez de données ESV pour : ", bassin, " en 2023"))
+}
+```
+
+```{r}
+# Combiner les plots avec patchwork
+# Le faire hors de markdown c'est plus joli
+wrap_plots(plot_list, ncol = 3, guides = "collect") + plot_annotation("2023 : Proportion des cépages par bassin viticole et test d'égalité des proportions", theme=theme(plot.title=element_text(hjust=0.5))) & theme(legend.position = "bottom")
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+

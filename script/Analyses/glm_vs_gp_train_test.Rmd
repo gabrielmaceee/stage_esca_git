@@ -1,0 +1,612 @@
+---
+title: "Comparaison glm / gaussian process"
+author: "Gabriel Macé"
+date: "2025-08-06"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+  pdf_document:
+    toc: true
+---
+
+```{css, echo=FALSE}
+h1 {
+    font-family: "Courier New", Courier, monospace; 
+    font-size: 36px; 
+    font-weight: bold;
+    text-decoration: underline;
+    text-align: center;
+    color: darkblue;
+}
+
+h2 {
+    text-decoration: underline;
+    color: darkred;
+}
+h3 {
+    color: blue;
+}
+
+h4 {
+    font-style: italic;
+    color: lightblue;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE)
+```
+
+```{r, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(reticulate)
+load("../../data/modelisation/observations_parcelles.RData")
+```
+
+```{r, include=FALSE}
+# Mettre les cépages et les régions en facteurs
+observations$cepage <- as.factor(observations$cepage)
+observations$region_viticole <- as.factor(observations$region_viticole)
+observations$age_10_20 <- 0
+observations$age_10_20[observations$age_parcelle_estime <= 20] <- 1
+observations$age_20_30 <- 0
+observations$age_20_30[observations$age_parcelle_estime > 20] <- 1
+
+observations$age_10_20 <- as.factor(observations$age_10_20)
+observations$age_20_30 <- as.factor(observations$age_20_30)
+```
+
+```{r}
+# On définit la proportion de données qu'on veut dans le jeu d'entraînement
+train_ratio <- 0.8
+
+train_indices <- observations %>%
+  group_by(identifiant_parcelle_analyse) %>%
+  group_split() %>%
+  lapply(function(group) {
+    n <- nrow(group)
+    if(n <= 5) sample(seq_len(n), size = ceiling(n/2)) # ceiling : arrondi au supérieur, floor : arrondi à l'inférieur
+    else sample(seq_len(n), size = ceiling(train_ratio * n))
+  })
+
+# Construction du jeu d'entraînement et de test
+# Associer les indices à chaque groupe
+train <- bind_rows(
+  Map(function(group, idx) group[idx, ], group_split(observations, observations$identifiant_parcelle_analyse), train_indices)
+)
+
+test <- anti_join(observations, train, by = colnames(observations))
+```
+
+```{r}
+
+med_parcelle <- med_parcelle <- train %>% group_by(identifiant_parcelle_analyse) %>% summarise(med_parcelle = median(pourcentage_esca))
+med_parcelle$esca_categoriel <- "[0;1["
+med_parcelle[med_parcelle$med_parcelle >= 1,]$esca_categoriel <- "[1;2["
+med_parcelle[med_parcelle$med_parcelle >= 2,]$esca_categoriel <- "[2;5["
+med_parcelle[med_parcelle$med_parcelle >= 5,]$esca_categoriel <- "[5;10["
+med_parcelle[med_parcelle$med_parcelle >= 10,]$esca_categoriel <- "[10;20["
+med_parcelle[med_parcelle$med_parcelle >= 20,]$esca_categoriel <- "[20;100["
+med_parcelle$esca_categoriel <- factor(med_parcelle$esca_categoriel, levels = c("[0;1[", "[1;2[", "[2;5[", "[5;10[", "[10;20[", "[20;100["))
+
+
+train <- train %>% left_join(med_parcelle[, c("identifiant_parcelle_analyse", "esca_categoriel")], by = "identifiant_parcelle_analyse")
+
+test <- test %>% left_join(med_parcelle[, c("identifiant_parcelle_analyse", "esca_categoriel")], by = "identifiant_parcelle_analyse")
+```
+
+```{r, include=FALSE}
+form <- as.formula(paste0("pourcentage_esca ~", "et0.symptomes + rr.symptomes +  rr.deb_flo +
+                          VPD.symptomes:tv.deb_flo + sum.heat.days.30.dormance + sum.days.isv.mod_sev.symptomes +
+                          sum.heat.days.30.dormance:isv.sev.seq.10.symptomes + tv.deb_flo +
+                          age_parcelle_estime:age_10_20 + 
+                          (1|age_10_20) + (1|region_viticole) + (1|esca_categoriel) + (1|cepage)"))
+
+best_lm <- glmer(form, data = train)
+pred_lm <- predict(best_lm, test)
+pred_lm[pred_lm < 0] <- 0
+projections <- cbind(test[, c("age_parcelle_estime", "esca_categoriel","cepage", "region_viticole", "annee", "pourcentage_esca")], pred_lm)
+```
+
+```{r, include=FALSE}
+  # Processus Gaussien
+  # transférer dans l'espace Python
+py$test <- r_to_py(test)
+py$train <- r_to_py(train)
+  
+  py_run_string('
+import pandas as pd
+import numpy as np
+  
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+  
+to_use = ["age_parcelle_estime", "et0.symptomes", "tv.deb_flo", "rr.deb_end", "VPD.symptomes", "rain.days", "tm.dormance", "rr.deb_flo", "auc_isv.symptomes", "tm.symptomes", "isv.deb_flo", "hu.dormance", "bh0.symptomes", "VPD.dormance", "VPD.deb_flo", "sum.heat.days.25.deb_flo", "rr", "sum.days.isv.faible", "sum.days.isv.fai_mod.dormance", "rr.symptomes", "sum.days.isv.sev.dormance", "auc_isv.dormance", "RU", "debourrement", "floraison"]
+to_keep = list(["cepage", "region_viticole"]) + to_use
+  
+
+
+train = pd.DataFrame(train)
+
+train["cepage"] = train["cepage"].astype("category")
+train["region_viticole"] = train["region_viticole"].astype("category")
+
+train = train.assign(esca_categoriel_cont = 0)
+train.loc[train.esca_categoriel == "[0;1[","esca_categoriel_cont"] = 0
+train.loc[train.esca_categoriel == "[1;2[","esca_categoriel_cont"] = 1 
+train.loc[train.esca_categoriel == "[2;5[","esca_categoriel_cont"] = 2
+train.loc[train.esca_categoriel == "[5;10[","esca_categoriel_cont"] = 3
+train.loc[train.esca_categoriel == "[10;20[","esca_categoriel_cont"] = 4
+train.loc[train.esca_categoriel == "[20;100[","esca_categoriel_cont"] = 5
+
+test = pd.DataFrame(test)
+
+test["cepage"] = test["cepage"].astype("category")
+test["region_viticole"] = test["region_viticole"].astype("category")
+
+test = test.assign(esca_categoriel_cont = 0)
+test.loc[test.esca_categoriel == "[0;1[","esca_categoriel_cont"] = 0
+test.loc[test.esca_categoriel == "[1;2[","esca_categoriel_cont"] = 1 
+test.loc[test.esca_categoriel == "[2;5[","esca_categoriel_cont"] = 2
+test.loc[test.esca_categoriel == "[5;10[","esca_categoriel_cont"] = 3
+test.loc[test.esca_categoriel == "[10;20[","esca_categoriel_cont"] = 4
+test.loc[test.esca_categoriel == "[20;100[","esca_categoriel_cont"] = 5
+  
+X_train = pd.get_dummies(train[to_keep])
+X_test = pd.get_dummies(test[to_keep])
+
+
+
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+
+pca = PCA(n_components=11)
+X_pca_train = pd.DataFrame(pca.fit_transform(X_train))
+X_pca_train = X_pca_train.rename(columns={0: "Dim_1", 1: "Dim_2", 2: "Dim_3", 3: "Dim_4", 4: "Dim_5", 5: "Dim_6", 6: "Dim_7", 7: "Dim_8", 8: "Dim_9", 9: "Dim_10", 10: "Dim_11"})
+X_pca_train["esca_categoriel"] = train["esca_categoriel_cont"]
+
+X_pca_test = pd.DataFrame(pca.transform(X_test))
+X_pca_test = X_pca_test.rename(columns={0: "Dim_1", 1: "Dim_2", 2: "Dim_3", 3: "Dim_4", 4: "Dim_5", 5: "Dim_6", 6: "Dim_7", 7: "Dim_8", 8: "Dim_9", 9: "Dim_10", 10: "Dim_11"})
+X_pca_test["esca_categoriel"] = test["esca_categoriel_cont"]
+
+y = train.pourcentage_esca
+gp = GaussianProcessRegressor(kernel=Matern(), random_state=0, normalize_y=True, alpha=0.25, n_restarts_optimizer=0).fit(X_pca_train, y)
+
+pred = gp.predict(X_pca_test, return_std=True)
+pred_gp = pred[0]
+pred_gp[pred_gp < 0] = 0
+')
+  
+pred_gp <- py_to_r(py$pred_gp)  # récupérer les projections
+  
+projections <- cbind(projections, pred_gp) # , gp_sd
+```
+
+## Prédictions
+
+```{r}
+print(paste0("glm : moyenne = ", round(mean(projections$pred_lm),2), ", écart type = ", round(sd(projections$pred_lm),2)))
+print(paste0("Processus gaussien : moyenne = ", round(mean(projections$pred_gp),2), ", écart type = ", round(sd(projections$pred_gp),2)))
+```
+Les prévisions du glm et du processus gaussiens sont très proches...
+
+```{r}
+to_plot <- projections %>%
+  rename(glm = pred_lm, gaussian_p = pred_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+ggplot(to_plot, aes(x = modele, y = esca, fill = modele)) +
+  geom_boxplot() +
+    labs(
+      title = paste("Prédiction d'incidence en fonction du modèle"),
+      x = "Modèle",
+      y = "Incidence moyenne",
+      fill = "Modèle"
+    ) 
+```
+
+
+
+```{r}
+to_plot <- projections %>%
+  group_by(annee) %>%
+  summarise(
+    glm = mean(pred_lm, na.rm = TRUE),
+    gaussian_p = mean(pred_gp, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+ggplot(to_plot, aes(x = annee, y = esca, color = modele)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Évolution des prédictions"),
+      x = "Année",
+      y = "Incidence prédite moyenne",
+      color = "Modèle"
+    )
+```
+
+
+
+```{r}
+to_plot <- projections %>%
+  group_by(age_parcelle_estime) %>%
+  summarise(
+    glm = mean(pred_lm, na.rm = TRUE),
+    gaussian_p = mean(pred_gp, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+ggplot(to_plot, aes(x = age_parcelle_estime, y = esca, color = modele)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Prédiction de l'incidence en fonction de l'âge"),
+      x = "Âge de la parcelle",
+      y = "Incidence prédite moyenne",
+      color = "Modèle"
+    )
+```
+
+
+```{r}
+to_plot <- projections %>%
+  rename(glm = pred_lm, gaussian_p = pred_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+ggplot(to_plot, aes(x = region_viticole, y = esca, fill = modele)) +
+  geom_boxplot() +
+    labs(
+      title = paste("Prédiction d'incidence en fonction de la région"),
+      x = "Région viticole",
+      y = "Incidence moyenne",
+      fill = "Modèle"
+    ) + theme(
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+```
+
+
+```{r}
+to_plot <- projections %>%
+  rename(glm = pred_lm, gaussian_p = pred_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+ggplot(to_plot, aes(x = cepage, y = esca, fill = modele)) +
+  geom_boxplot() +
+    labs(
+      title = paste("Prédiction d'incidence en fonction du cépage"),
+      x = "Cépage",
+      y = "Incidence moyenne",
+      fill = "Modèle"
+    ) + theme(
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+```
+
+Pas de grosses différences, à part peut être pour le trousseau où on observe une belle différence entre les médianes.
+
+```{r}
+to_plot <- projections %>%
+  rename(glm = pred_lm, gaussian_p = pred_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+ggplot(to_plot, aes(x = esca_categoriel, y = esca, fill = modele)) +
+  geom_boxplot() +
+    labs(
+      title = paste("Prédiction d'incidence en fonction de la catégorie d'incidence"),
+      x = "Catégorie d'incidence",
+      y = "Incidence moyenne",
+      fill = "Modèle"
+    ) + theme(
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+```
+
+GLM : a du mal à s'éloigner de la catégorie d'esca observée
+
+
+## Erreurs
+
+```{r}
+projections$erreur_lm <- abs(projections$pred_lm - projections$pourcentage_esca)
+projections$erreur_gp <- abs(projections$pred_gp - projections$pourcentage_esca)
+
+
+
+print(paste0("glm : erreur moyenne = ", round(mean(projections$erreur_lm),2), ", écart type = ", round(sd(projections$erreur_lm),2), ", r² = ", round(cor(projections$pred_lm, projections$pourcentage_esca)^2,2)))
+print(paste0("Processus gaussien : erreur moyenne = ", round(mean(projections$erreur_gp),2), ", écart type = ", round(sd(projections$erreur_gp),2), ", r² = ", round(cor(projections$pred_gp, projections$pourcentage_esca)^2,2)))
+```
+Les erreurs du glm sont en général plus fortes, mais la différence n'est pas énorme.
+
+
+```{r}
+to_plot <- projections %>%
+  group_by(annee) %>%
+  summarise(
+    glm_mae = mean(erreur_lm),
+    gaussian_p_mae = mean(erreur_gp),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm_mae, gaussian_p_mae),
+    names_to = "modele",
+    values_to = "erreur")
+
+ggplot(to_plot, aes(x = annee, y = erreur, color = modele)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Évolution des erreurs moyennes"),
+      x = "Année",
+      y = "Erreur moyenne",
+      color = "Modèle"
+    )
+
+to_plot <- projections %>%
+  group_by(annee) %>%
+  summarise(
+    glm_rmse = sqrt(mean(erreur_lm^2)),
+    gaussian_p_rmse = sqrt(mean(erreur_gp^2)),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm_rmse, gaussian_p_rmse),
+    names_to = "modele",
+    values_to = "erreur")
+
+ggplot(to_plot, aes(x = annee, y = erreur, color = modele)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Évolution de la rmse"),
+      x = "Année",
+      y = "RMSE",
+      color = "Modèle")
+
+to_plot <- projections %>%
+  group_by(annee) %>%
+  summarise(
+    glm_r2 = cor(pred_lm, pourcentage_esca)^2,
+    gaussian_p_r2 = cor(pred_gp, pourcentage_esca)^2,
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm_r2, gaussian_p_r2),
+    names_to = "modele",
+    values_to = "erreur")
+
+ggplot(to_plot, aes(x = annee, y = erreur, color = modele)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Évolution du r²"),
+      x = "Année",
+      y = "R²",
+      color = "Modèle")
+```
+
+
+```{r}
+to_plot <- projections %>%
+  group_by(age_parcelle_estime) %>%
+  summarise(
+    glm_mae = mean(erreur_lm),
+    gaussian_p_mae = mean(erreur_gp),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm_mae, gaussian_p_mae),
+    names_to = "modele",
+    values_to = "erreur")
+
+ggplot(to_plot, aes(x = age_parcelle_estime, y = erreur, color = modele)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Évolution des erreurs moyennes"),
+      x = "Âge",
+      y = "Erreur moyenne",
+      color = "Modèle"
+    )
+
+to_plot <- projections %>%
+  group_by(age_parcelle_estime) %>%
+  summarise(
+    glm_rmse = sqrt(mean(erreur_lm^2)),
+    gaussian_p_rmse = sqrt(mean(erreur_gp^2)),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm_rmse, gaussian_p_rmse),
+    names_to = "modele",
+    values_to = "erreur")
+
+ggplot(to_plot, aes(x = age_parcelle_estime, y = erreur, color = modele)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Évolution de la rmse"),
+      x = "Âge",
+      y = "RMSE",
+      color = "Modèle")
+
+to_plot <- projections %>%
+  group_by(age_parcelle_estime) %>%
+  summarise(
+    glm_r2 = cor(pred_lm, pourcentage_esca)^2,
+    gaussian_p_r2 = cor(pred_gp, pourcentage_esca)^2,
+    .groups = "drop"
+  ) %>%
+  pivot_longer(
+    cols = c(glm_r2, gaussian_p_r2),
+    names_to = "modele",
+    values_to = "erreur")
+
+ggplot(to_plot, aes(x = age_parcelle_estime, y = erreur, color = modele)) +
+    geom_line(linewidth = 1) +
+    labs(
+      title = paste("Évolution du r²"),
+      x = "Âge",
+      y = "R²",
+      color = "Modèle")
+```
+
+
+```{r}
+to_plot <- projections %>%
+  rename(glm = erreur_lm, gaussian_p = erreur_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+
+counts <- projections %>%
+  group_by(region_viticole) %>%
+  summarise(n = n(), r2_lm = round(cor(pred_lm, pourcentage_esca)^2, 2), r2_gp = round(cor(pred_gp, pourcentage_esca)^2,2) , med_esca = median(erreur_lm), .groups = "drop")
+
+ggplot(to_plot, aes(
+  x = reorder(region_viticole, esca, FUN = median),
+  y = esca,
+  fill = modele)) +
+  geom_boxplot() +
+  # Ajouter un seul (n) par région viticole
+  geom_text(
+    data = counts,
+    aes(
+      x = reorder(region_viticole, med_esca),
+      label = paste0("n=", n), ),
+    y = 10.2, # <- fixé ici
+    inherit.aes = FALSE,
+    size = 3) +
+  
+  ylim(0, 10.5) +
+  labs(
+    title = "Erreurs en fonction de la région",
+    x = "Région viticole",
+    y = "Erreur",
+    fill = "Modèle") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+```
+
+```{r}
+r2 <- projections %>%
+  rename(glm = pred_lm, gaussian_p = pred_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca") %>%
+  group_by(region_viticole, modele) %>%
+  summarise(r2 = round(cor(esca, pourcentage_esca)^2, 2), .groups = "drop")
+
+r2 %>% ggplot(aes(x = r2, y = reorder(region_viticole, r2), fill = modele)) + 
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "R² par région",
+       x = "R²",
+       y = "Région viticole")
+
+```
+
+
+```{r}
+to_plot <- projections %>%
+  rename(glm = erreur_lm, gaussian_p = erreur_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+counts <- projections %>%
+  group_by(cepage) %>%
+  summarise(n = n(), r2_lm = round(cor(pred_lm, pourcentage_esca)^2, 2), r2_gp = round(cor(pred_gp, pourcentage_esca)^2,2) , med_esca = median(erreur_lm), .groups = "drop")
+
+ggplot(to_plot, aes(
+  x = reorder(cepage, esca, FUN = median),
+  y = esca,
+  fill = modele
+)) +
+  geom_boxplot() +
+  geom_text(
+    data = counts,
+    aes(x = reorder(cepage, med_esca),
+      label = paste0("n=", n)),
+    y = 10.2, # <- fixé ici
+    inherit.aes = FALSE,
+    size = 3
+  ) +
+  
+  ylim(0, 10.5) +
+  labs(
+    title = "Erreurs en fonction du cépage",
+    x = "Cépage",
+    y = "Erreur",
+    fill = "Modèle") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+```
+
+```{r}
+r2 <- projections %>%
+  rename(glm = pred_lm, gaussian_p = pred_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca") %>%
+  group_by(cepage, modele) %>%
+  summarise(r2 = round(cor(esca, pourcentage_esca)^2, 2), .groups = "drop")
+
+r2 %>% ggplot(aes(x = r2, y = reorder(cepage, r2), fill = modele)) + 
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "R² par cépage",
+       x = "R²",
+       y = "Cépage")
+```
+
+```{r}
+to_plot <- projections %>%
+  rename(glm = pred_lm, gaussian_p = pred_gp) %>%
+  pivot_longer(
+    cols = c(glm, gaussian_p),
+    names_to = "modele",
+    values_to = "esca")
+
+ggplot(to_plot, aes(x = esca_categoriel, y = esca, fill = modele)) +
+  geom_boxplot() + ylim(0, 10) +
+    labs(
+      title = paste("Prédiction d'incidence en fonction de la catégorie d'incidence"),
+      x = "Catégorie d'incidence",
+      y = "Incidence moyenne",
+      fill = "Modèle"
+    ) + theme(
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+```
+
+
+
+
